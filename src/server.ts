@@ -38,6 +38,20 @@ export function createServer(config: Config): McpServer {
     return response(await jsonGh(args, config));
   });
 
+  server.registerTool("list_organizations", {
+    description: "List organizations visible to the authenticated GitHub CLI account, including private memberships allowed by its scopes.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true, destructiveHint: false },
+  }, async () => {
+    const pages = await jsonGh(["api", "user/orgs", "--paginate", "--slurp"], config);
+    if (!Array.isArray(pages)) throw new Error("GitHub CLI returned an unexpected organizations response.");
+    const organizations = pages.flatMap((page) => Array.isArray(page) ? page : []).map((organization) => {
+      const item = organization as Record<string, unknown>;
+      return { login: item.login, id: item.id, url: item.html_url, description: item.description };
+    });
+    return response(organizations);
+  });
+
   const repositorySchema = { repository: z.string().describe("Repository in owner/name format") };
   server.registerTool("list_issues", {
     description: "List issues in an allowed repository.",
