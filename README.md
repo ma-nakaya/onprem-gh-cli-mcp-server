@@ -8,6 +8,7 @@
 ## 提供ツール
 
 - `get_auth_status`: トークンを表示せず認証状態を確認
+- `list_organizations`: 認証ユーザーから見える所属Organization一覧
 - `list_repositories`: Repository一覧
 - `list_issues`: Issue一覧
 - `list_pull_requests`: Pull Request一覧
