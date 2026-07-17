@@ -4,6 +4,7 @@ import { restrictedEnvironment } from "./config.js";
 import { redactSecrets } from "./redaction.js";
 
 export interface GhResult { exitCode: number; stdout: string; stderr: string }
+export interface RunGhOptions { allowFailure?: boolean; stdin?: string }
 
 export class GhExecutionError extends Error {
   constructor(public readonly result: GhResult) {
@@ -12,9 +13,15 @@ export class GhExecutionError extends Error {
   }
 }
 
-export async function runGh(args: readonly string[], config: Config, options: { allowFailure?: boolean } = {}): Promise<GhResult> {
+export async function runGh(args: readonly string[], config: Config, options: RunGhOptions = {}): Promise<GhResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(config.ghPath, [...args], { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: restrictedEnvironment() });
+    const hasStdin = options.stdin !== undefined;
+    const child = spawn(config.ghPath, [...args], {
+      shell: false,
+      windowsHide: true,
+      stdio: [hasStdin ? "pipe" : "ignore", "pipe", "pipe"],
+      env: restrictedEnvironment(),
+    });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let outputBytes = 0;
@@ -26,6 +33,7 @@ export async function runGh(args: readonly string[], config: Config, options: { 
     };
     child.stdout.on("data", (chunk: Buffer) => { append(stdout, chunk); });
     child.stderr.on("data", (chunk: Buffer) => { append(stderr, chunk); });
+    if (hasStdin && child.stdin) child.stdin.end(options.stdin, "utf8");
     const timer = setTimeout(() => { child.kill(); reject(new Error(`gh command timed out after ${config.timeoutMs} ms.`)); }, config.timeoutMs);
     child.once("error", (error) => { clearTimeout(timer); reject(new Error(`Unable to start GitHub CLI at '${config.ghPath}': ${error.message}`)); });
     child.once("close", (code) => {
