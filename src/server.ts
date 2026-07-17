@@ -1,7 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { appendAuditRecord } from "./audit-log.js";
 import type { Config } from "./config.js";
 import { runGh } from "./gh-runner.js";
+import type { RunGhOptions } from "./gh-runner.js";
 import { assertHostAllowed, assertRepositoryAllowed, assertSafeGhArguments } from "./policy.js";
 
 function response(value: unknown) {
@@ -9,10 +11,87 @@ function response(value: unknown) {
   return { content: [{ type: "text" as const, text }] };
 }
 
-async function jsonGh(args: string[], config: Config): Promise<unknown> {
-  const result = await runGh(args, config);
+async function jsonGh(args: string[], config: Config, options: RunGhOptions = {}): Promise<unknown> {
+  const result = await runGh(args, config, options);
   try { return JSON.parse(result.stdout || "null"); }
   catch { throw new Error("GitHub CLI returned invalid JSON."); }
+}
+
+async function assertStandaloneIssue(repository: string, issueNumber: number, hostname: string, config: Config): Promise<void> {
+  const value = await jsonGh(["api", `repos/${repository}/issues/${issueNumber}`, "--hostname", hostname], config);
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("GitHub API returned an unexpected issue response.");
+  const item = value as Record<string, unknown>;
+  if (item.pull_request !== undefined) throw new Error(`Issue #${issueNumber} is a pull request. Use a Pull Request-specific tool instead.`);
+}
+
+interface AuditTarget {
+  tool: string;
+  hostname: string;
+  repository: string;
+  issueNumber?: number;
+}
+
+async function auditedJsonGh(
+  target: AuditTarget,
+  args: string[],
+  payload: Record<string, unknown>,
+  config: Config,
+): Promise<{ value: unknown; audit: { started: true; completed: boolean } }> {
+  const startedAt = Date.now();
+  await appendAuditRecord(config.auditLogPath, {
+    ...target,
+    outcome: "started",
+    durationMs: 0,
+  });
+  try {
+    const value = await jsonGh(args, config, { stdin: JSON.stringify(payload) });
+    let completed = true;
+    try {
+      await appendAuditRecord(config.auditLogPath, {
+        ...target,
+        outcome: "succeeded",
+        durationMs: Date.now() - startedAt,
+      });
+    } catch {
+      completed = false;
+    }
+    return { value, audit: { started: true, completed } };
+  } catch (error) {
+    try {
+      await appendAuditRecord(config.auditLogPath, {
+        ...target,
+        outcome: "failed",
+        durationMs: Date.now() - startedAt,
+      });
+    } catch {
+      // Preserve the original GitHub operation error. The initial audit record was already written.
+    }
+    throw error;
+  }
+}
+
+function issueSummary(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("GitHub API returned an unexpected issue response.");
+  const item = value as Record<string, unknown>;
+  return {
+    number: item.number,
+    title: item.title,
+    state: item.state,
+    url: item.html_url,
+    createdAt: item.created_at,
+    updatedAt: item.updated_at,
+  };
+}
+
+function commentSummary(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("GitHub API returned an unexpected issue comment response.");
+  const item = value as Record<string, unknown>;
+  return {
+    id: item.id,
+    url: item.html_url,
+    createdAt: item.created_at,
+    updatedAt: item.updated_at,
+  };
 }
 
 export function createServer(config: Config): McpServer {
@@ -53,6 +132,11 @@ export function createServer(config: Config): McpServer {
   });
 
   const repositorySchema = { repository: z.string().describe("Repository in owner/name format") };
+  const writeContextSchema = {
+    ...repositorySchema,
+    hostname: z.string().min(1).default("github.com"),
+  };
+
   server.registerTool("list_issues", {
     description: "List issues in an allowed repository.",
     inputSchema: { ...repositorySchema, state: z.enum(["open", "closed", "all"]).default("open"), limit: z.number().int().min(1).max(100).default(30) },
@@ -60,6 +144,82 @@ export function createServer(config: Config): McpServer {
   }, async ({ repository, state, limit }) => {
     assertRepositoryAllowed(repository, config);
     return response(await jsonGh(["issue", "list", "--repo", repository, "--state", state, "--limit", String(limit), "--json", "number,title,state,author,assignees,labels,createdAt,updatedAt,url"], config));
+  });
+
+  server.registerTool("create_issue", {
+    description: "Create an issue in an allowed repository. The title and body are sent to gh through stdin and are not written to the audit log.",
+    inputSchema: {
+      ...writeContextSchema,
+      title: z.string().min(1).max(256),
+      body: z.string().max(65_536).optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  }, async ({ repository, hostname, title, body }) => {
+    assertHostAllowed(hostname, config);
+    assertRepositoryAllowed(repository, config);
+    const normalizedRepository = repository.trim();
+    const normalizedHostname = hostname.trim().toLowerCase();
+    const payload = body === undefined ? { title } : { title, body };
+    const operation = await auditedJsonGh(
+      { tool: "create_issue", hostname: normalizedHostname, repository: normalizedRepository },
+      ["api", `repos/${normalizedRepository}/issues`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+      payload,
+      config,
+    );
+    return response({ issue: issueSummary(operation.value), audit: operation.audit });
+  });
+
+  server.registerTool("update_issue", {
+    description: "Update an issue title, body, or reversible open/closed state in an allowed repository.",
+    inputSchema: {
+      ...writeContextSchema,
+      issueNumber: z.number().int().positive(),
+      title: z.string().min(1).max(256).optional(),
+      body: z.string().max(65_536).optional(),
+      state: z.enum(["open", "closed"]).optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  }, async ({ repository, hostname, issueNumber, title, body, state }) => {
+    assertHostAllowed(hostname, config);
+    assertRepositoryAllowed(repository, config);
+    const normalizedRepository = repository.trim();
+    const normalizedHostname = hostname.trim().toLowerCase();
+    const payload: Record<string, unknown> = {};
+    if (title !== undefined) payload.title = title;
+    if (body !== undefined) payload.body = body;
+    if (state !== undefined) payload.state = state;
+    if (Object.keys(payload).length === 0) throw new Error("At least one of title, body, or state must be provided.");
+    await assertStandaloneIssue(normalizedRepository, issueNumber, normalizedHostname, config);
+    const operation = await auditedJsonGh(
+      { tool: "update_issue", hostname: normalizedHostname, repository: normalizedRepository, issueNumber },
+      ["api", `repos/${normalizedRepository}/issues/${issueNumber}`, "--hostname", normalizedHostname, "--method", "PATCH", "--input", "-"],
+      payload,
+      config,
+    );
+    return response({ issue: issueSummary(operation.value), audit: operation.audit });
+  });
+
+  server.registerTool("comment_issue", {
+    description: "Add a comment to an issue in an allowed repository. The comment body is sent through stdin and is not written to the audit log.",
+    inputSchema: {
+      ...writeContextSchema,
+      issueNumber: z.number().int().positive(),
+      body: z.string().min(1).max(65_536),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  }, async ({ repository, hostname, issueNumber, body }) => {
+    assertHostAllowed(hostname, config);
+    assertRepositoryAllowed(repository, config);
+    const normalizedRepository = repository.trim();
+    const normalizedHostname = hostname.trim().toLowerCase();
+    await assertStandaloneIssue(normalizedRepository, issueNumber, normalizedHostname, config);
+    const operation = await auditedJsonGh(
+      { tool: "comment_issue", hostname: normalizedHostname, repository: normalizedRepository, issueNumber },
+      ["api", `repos/${normalizedRepository}/issues/${issueNumber}/comments`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+      { body },
+      config,
+    );
+    return response({ comment: commentSummary(operation.value), audit: operation.audit });
   });
 
   server.registerTool("list_pull_requests", {
