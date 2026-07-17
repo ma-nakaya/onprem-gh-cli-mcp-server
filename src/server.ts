@@ -17,6 +17,13 @@ async function jsonGh(args: string[], config: Config, options: RunGhOptions = {}
   catch { throw new Error("GitHub CLI returned invalid JSON."); }
 }
 
+async function assertStandaloneIssue(repository: string, issueNumber: number, hostname: string, config: Config): Promise<void> {
+  const value = await jsonGh(["api", `repos/${repository}/issues/${issueNumber}`, "--hostname", hostname], config);
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("GitHub API returned an unexpected issue response.");
+  const item = value as Record<string, unknown>;
+  if (item.pull_request !== undefined) throw new Error(`Issue #${issueNumber} is a pull request. Use a Pull Request-specific tool instead.`);
+}
+
 interface AuditTarget {
   tool: string;
   hostname: string;
@@ -150,10 +157,12 @@ export function createServer(config: Config): McpServer {
   }, async ({ repository, hostname, title, body }) => {
     assertHostAllowed(hostname, config);
     assertRepositoryAllowed(repository, config);
+    const normalizedRepository = repository.trim();
+    const normalizedHostname = hostname.trim().toLowerCase();
     const payload = body === undefined ? { title } : { title, body };
     const operation = await auditedJsonGh(
-      { tool: "create_issue", hostname, repository },
-      ["api", `repos/${repository}/issues`, "--hostname", hostname, "--method", "POST", "--input", "-"],
+      { tool: "create_issue", hostname: normalizedHostname, repository: normalizedRepository },
+      ["api", `repos/${normalizedRepository}/issues`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
       payload,
       config,
     );
@@ -173,14 +182,17 @@ export function createServer(config: Config): McpServer {
   }, async ({ repository, hostname, issueNumber, title, body, state }) => {
     assertHostAllowed(hostname, config);
     assertRepositoryAllowed(repository, config);
+    const normalizedRepository = repository.trim();
+    const normalizedHostname = hostname.trim().toLowerCase();
     const payload: Record<string, unknown> = {};
     if (title !== undefined) payload.title = title;
     if (body !== undefined) payload.body = body;
     if (state !== undefined) payload.state = state;
     if (Object.keys(payload).length === 0) throw new Error("At least one of title, body, or state must be provided.");
+    await assertStandaloneIssue(normalizedRepository, issueNumber, normalizedHostname, config);
     const operation = await auditedJsonGh(
-      { tool: "update_issue", hostname, repository, issueNumber },
-      ["api", `repos/${repository}/issues/${issueNumber}`, "--hostname", hostname, "--method", "PATCH", "--input", "-"],
+      { tool: "update_issue", hostname: normalizedHostname, repository: normalizedRepository, issueNumber },
+      ["api", `repos/${normalizedRepository}/issues/${issueNumber}`, "--hostname", normalizedHostname, "--method", "PATCH", "--input", "-"],
       payload,
       config,
     );
@@ -198,9 +210,12 @@ export function createServer(config: Config): McpServer {
   }, async ({ repository, hostname, issueNumber, body }) => {
     assertHostAllowed(hostname, config);
     assertRepositoryAllowed(repository, config);
+    const normalizedRepository = repository.trim();
+    const normalizedHostname = hostname.trim().toLowerCase();
+    await assertStandaloneIssue(normalizedRepository, issueNumber, normalizedHostname, config);
     const operation = await auditedJsonGh(
-      { tool: "comment_issue", hostname, repository, issueNumber },
-      ["api", `repos/${repository}/issues/${issueNumber}/comments`, "--hostname", hostname, "--method", "POST", "--input", "-"],
+      { tool: "comment_issue", hostname: normalizedHostname, repository: normalizedRepository, issueNumber },
+      ["api", `repos/${normalizedRepository}/issues/${issueNumber}/comments`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
       { body },
       config,
     );
