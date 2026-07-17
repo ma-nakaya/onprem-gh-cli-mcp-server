@@ -9,6 +9,7 @@ const config: Config = {
 
 describe("read-only policy", () => {
   it("allows safe repository reads", () => expect(() => assertSafeGhArguments(["repo", "view", "ma-nakaya/example"])).not.toThrow());
+  it("allows read-only API requests", () => expect(() => assertSafeGhArguments(["api", "user/orgs", "--paginate", "--slurp"])).not.toThrow());
   it("blocks destructive commands", () => {
     expect(() => assertSafeGhArguments(["repo", "delete", "ma-nakaya/example"])).toThrow(/not allowed/);
     expect(() => assertSafeGhArguments(["pr", "merge", "1"])).toThrow(/not allowed/);
