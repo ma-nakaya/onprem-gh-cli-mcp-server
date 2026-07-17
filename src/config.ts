@@ -1,3 +1,6 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 export interface Config {
   ghPath: string;
   allowedHosts: ReadonlySet<string>;
@@ -5,6 +8,7 @@ export interface Config {
   allowedRepositories: ReadonlySet<string>;
   timeoutMs: number;
   maxOutputBytes: number;
+  auditLogPath: string;
 }
 
 function csv(value: string | undefined): ReadonlySet<string> {
@@ -16,6 +20,13 @@ function positiveInteger(value: string | undefined, fallback: number): number {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function defaultAuditLogPath(env: NodeJS.ProcessEnv): string {
+  const baseDirectory = process.platform === "win32"
+    ? env.LOCALAPPDATA?.trim() || join(homedir(), "AppData", "Local")
+    : env.XDG_STATE_HOME?.trim() || join(homedir(), ".local", "state");
+  return join(baseDirectory, "onprem-gh-cli-mcp", "audit.jsonl");
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     ghPath: env.GH_MCP_GH_PATH?.trim() || (process.platform === "win32" ? "gh.exe" : "gh"),
@@ -24,6 +35,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     allowedRepositories: csv(env.GH_MCP_ALLOWED_REPOSITORIES),
     timeoutMs: positiveInteger(env.GH_MCP_TIMEOUT_MS, 30_000),
     maxOutputBytes: positiveInteger(env.GH_MCP_MAX_OUTPUT_BYTES, 1_000_000),
+    auditLogPath: env.GH_MCP_AUDIT_LOG_PATH?.trim() || defaultAuditLogPath(env),
   };
 }
 
