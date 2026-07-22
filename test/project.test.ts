@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildUpdateProjectMutation, graphqlProject, ownerNodeId, projectIdentifier, projectSummary } from "../src/project.js";
+import { buildUpdateProjectMutation, graphqlProject, ownerNodeId, projectFieldValue, projectFieldsSummary, projectIdentifier, projectItemsSummary, projectSummary } from "../src/project.js";
 
 describe("GitHub Projects v2 response handling", () => {
   const project = {
@@ -50,5 +50,23 @@ describe("GitHub Projects v2 response handling", () => {
     expect(update.query).not.toContain("shortDescription:");
     expect(update.query).not.toContain("readme:");
     expect(() => buildUpdateProjectMutation("PVT_example123", {})).toThrow(/At least one/);
+  });
+
+  it("summarizes project items without bodies or field values", () => {
+    const result = projectItemsSummary({ data: { node: { __typename: "ProjectV2", items: { totalCount: 1, nodes: [{ id: "PVTI_one", isArchived: false, content: { __typename: "Issue", title: "Safe title", number: 20, url: "https://example.test/20", state: "OPEN", body: "secret", repository: { nameWithOwner: "example/repo" } }, fieldValues: { secret: true } }] } } } });
+    expect(result).toEqual({ totalCount: 1, items: [{ id: "PVTI_one", type: "Issue", archived: false, content: { title: "Safe title", number: 20, url: "https://example.test/20", state: "OPEN", repository: "example/repo" } }] });
+    expect(JSON.stringify(result)).not.toContain("secret");
+  });
+
+  it("returns selectable field metadata and validates update values", () => {
+    const result = projectFieldsSummary({ data: { node: { __typename: "ProjectV2", fields: { totalCount: 1, nodes: [{ __typename: "ProjectV2SingleSelectField", id: "PVTSSF_one", name: "Status", dataType: "SINGLE_SELECT", options: [{ id: "ready", name: "Ready" }] }] } } } });
+    expect(result).toMatchObject({ totalCount: 1, fields: [{ id: "PVTSSF_one", options: [{ id: "ready", name: "Ready" }] }] });
+    expect(projectFieldValue("text", "hello")).toEqual({ text: "hello" });
+    expect(projectFieldValue("number", 2.5)).toEqual({ number: 2.5 });
+    expect(projectFieldValue("date", "2026-07-22")).toEqual({ date: "2026-07-22" });
+    expect(projectFieldValue("singleSelect", "ready")).toEqual({ singleSelectOptionId: "ready" });
+    expect(projectFieldValue("iteration", "iteration-1")).toEqual({ iterationId: "iteration-1" });
+    expect(() => projectFieldValue("date", "22/07/2026")).toThrow(/YYYY-MM-DD/);
+    expect(() => projectFieldValue("number", Number.NaN)).toThrow(/finite/);
   });
 });
