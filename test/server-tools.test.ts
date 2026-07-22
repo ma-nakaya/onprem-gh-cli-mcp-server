@@ -50,6 +50,16 @@ describe("MCP tool registration", () => {
       }
       expect(tools.has("delete_project")).toBe(false);
       expect(tools.has("publish_project")).toBe(false);
+      for (const name of ["list_project_items", "list_project_fields"]) {
+        expect(tools.has(name)).toBe(true);
+        expect(tools.get(name)?.annotations?.readOnlyHint).toBe(true);
+      }
+      for (const name of ["add_project_item", "set_project_item_field", "clear_project_item_field", "set_project_item_archived"]) {
+        expect(tools.has(name)).toBe(true);
+        expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
+      }
+      expect(tools.has("delete_project_item")).toBe(false);
+      expect(tools.has("create_project_field")).toBe(false);
       expect(tools.get("run_gh")?.annotations?.readOnlyHint).toBe(true);
     } finally {
       await client.close();
