@@ -12,6 +12,9 @@ export interface AuditRecord {
   projectId?: string;
   projectItemId?: string;
   projectFieldId?: string;
+  branch?: string;
+  commitSha?: string;
+  fileCount?: number;
   issueNumber?: number;
   pullRequestNumber?: number;
   releaseId?: number;
@@ -33,6 +36,9 @@ export async function appendAuditRecord(auditLogPath: string, record: AuditRecor
     ...(record.projectId === undefined ? {} : { projectId: record.projectId }),
     ...(record.projectItemId === undefined ? {} : { projectItemId: record.projectItemId }),
     ...(record.projectFieldId === undefined ? {} : { projectFieldId: record.projectFieldId }),
+    ...(record.branch === undefined ? {} : { branch: record.branch }),
+    ...(record.commitSha === undefined ? {} : { commitSha: record.commitSha }),
+    ...(record.fileCount === undefined ? {} : { fileCount: record.fileCount }),
     ...(record.issueNumber === undefined ? {} : { issueNumber: record.issueNumber }),
     ...(record.pullRequestNumber === undefined ? {} : { pullRequestNumber: record.pullRequestNumber }),
     ...(record.releaseId === undefined ? {} : { releaseId: record.releaseId }),
