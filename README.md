@@ -160,6 +160,8 @@ tunnel-client.exe run --profile gh-cli
 
 ChatGPT Developer modeでのTunnel選択、Scan Tools、読み取り疎通確認を含む手順は[ChatGPT connectivity runbook](docs/chatgpt-connectivity.md)を参照してください。
 
+手動疎通確認後は、`scripts/windows/run-gh-cli-mcp-tunnel.vbs`と`install-gh-cli-tunnel-task.ps1`を使用して、Tunnel Clientをコンソール非表示でログオン時に起動できます。Runtime API Keyはスクリプトへ保存しません。
+
 ## セキュリティ
 
 - `shell: false`で`gh.exe`を直接起動
