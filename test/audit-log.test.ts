@@ -125,4 +125,34 @@ describe("audit log", () => {
     expect(text).not.toContain("environment");
     expect(text).not.toContain("production");
   });
+
+  it("records label and milestone targets without descriptions", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "onprem-gh-cli-mcp-"));
+    temporaryDirectories.push(directory);
+    const auditLogPath = join(directory, "audit.jsonl");
+
+    await appendAuditRecord(auditLogPath, {
+      timestamp: "2026-07-22T05:00:00.000Z",
+      tool: "update_label",
+      hostname: "github.com",
+      repository: "ma-nakaya/example",
+      label: "priority-high",
+      outcome: "succeeded",
+      durationMs: 8,
+    });
+    await appendAuditRecord(auditLogPath, {
+      timestamp: "2026-07-22T05:01:00.000Z",
+      tool: "update_milestone",
+      hostname: "github.com",
+      repository: "ma-nakaya/example",
+      milestoneNumber: 7,
+      outcome: "succeeded",
+      durationMs: 9,
+    });
+
+    const records = (await readFile(auditLogPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    expect(records[0].label).toBe("priority-high");
+    expect(records[1].milestoneNumber).toBe(7);
+    expect(JSON.stringify(records)).not.toContain("description content");
+  });
 });
