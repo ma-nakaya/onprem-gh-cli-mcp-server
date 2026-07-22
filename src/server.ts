@@ -7,6 +7,7 @@ import type { RunGhOptions } from "./gh-runner.js";
 import { assertHostAllowed, assertRepositoryAllowed, assertSafeGhArguments } from "./policy.js";
 import { assertReviewBody, pullRequestReviewSummary, pullRequestSummary } from "./pull-request.js";
 import { assertDraftRelease, releaseIdentifier, releaseSummary } from "./release.js";
+import { assertActiveWorkflow, isWorkflowIdentifier, normalizeWorkflowInputs, workflowSummary } from "./workflow.js";
 
 function response(value: unknown) {
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
@@ -37,6 +38,7 @@ interface AuditTarget {
   issueNumber?: number;
   pullRequestNumber?: number;
   releaseId?: number;
+  workflow?: string;
 }
 
 async function auditedJsonGh(
@@ -149,6 +151,10 @@ export function createServer(config: Config): McpServer {
   const gitRefSchema = z.string().trim().min(1).max(255).refine(
     (value) => !/[\0\r\n]/.test(value),
     "Git reference must not contain control characters.",
+  );
+  const workflowIdentifierSchema = z.string().trim().min(1).max(255).refine(
+    isWorkflowIdentifier,
+    "Workflow must be a positive numeric ID or a .yml/.yaml file name.",
   );
 
   server.registerTool("list_issues", {
@@ -366,6 +372,35 @@ export function createServer(config: Config): McpServer {
   }, async ({ repository, limit }) => {
     assertRepositoryAllowed(repository, config);
     return response(await jsonGh(["run", "list", "--repo", repository, "--limit", String(limit), "--json", "databaseId,name,displayTitle,status,conclusion,event,headBranch,createdAt,updatedAt,url"], config));
+  });
+
+  server.registerTool("dispatch_workflow", {
+    description: "Dispatch an active GitHub Actions workflow in an allowed repository. Workflow inputs are sent through stdin and are not returned or written to the audit log.",
+    inputSchema: {
+      ...writeContextSchema,
+      workflow: workflowIdentifierSchema,
+      ref: gitRefSchema,
+      inputs: z.record(z.string(), z.string()).optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  }, async ({ repository, hostname, workflow, ref, inputs }) => {
+    assertHostAllowed(hostname, config);
+    assertRepositoryAllowed(repository, config);
+    const normalizedRepository = repository.trim();
+    const normalizedHostname = hostname.trim().toLowerCase();
+    const normalizedWorkflow = workflow.trim();
+    const normalizedRef = ref.trim();
+    const normalizedInputs = normalizeWorkflowInputs(inputs ?? {});
+    const workflowPath = `repos/${normalizedRepository}/actions/workflows/${encodeURIComponent(normalizedWorkflow)}`;
+    const existing = await jsonGh(["api", workflowPath, "--hostname", normalizedHostname], config);
+    assertActiveWorkflow(existing, normalizedWorkflow);
+    const operation = await auditedJsonGh(
+      { tool: "dispatch_workflow", hostname: normalizedHostname, repository: normalizedRepository, workflow: normalizedWorkflow },
+      ["api", `${workflowPath}/dispatches`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+      { ref: normalizedRef, inputs: normalizedInputs },
+      config,
+    );
+    return response({ accepted: true, workflow: workflowSummary(existing), ref: normalizedRef, audit: operation.audit });
   });
 
   server.registerTool("create_release", {
