@@ -62,7 +62,8 @@ tunnel-client.exe init `
   --sample sample_mcp_stdio_local `
   --profile gh-cli `
   --tunnel-id <tunnel-id> `
-  --mcp-command "node C:\src\onprem-gh-cli-mcp-server\dist\cli.js"
+  --health-listen-addr "127.0.0.1:8081" `
+  --mcp-command "node C:/Workspace/onprem-gh-cli-mcp-server/dist/cli.js"
 
 tunnel-client.exe doctor --profile gh-cli --explain
 tunnel-client.exe run --profile gh-cli
@@ -116,3 +117,51 @@ npx.cmd --yes --prefer-offline @ma-nakaya/onprem-gh-cli-mcp@0.1.0
 ```
 
 Do not use `@latest` for the tunnel profile. Re-run `doctor`, **Scan Tools**, and the read-only tests after changing the command or tool definitions.
+
+## 8. Run without a visible console window
+
+After the manual ChatGPT connectivity test succeeds, use the Windows Script Host wrapper in `scripts/windows/run-gh-cli-mcp-tunnel.vbs`. It starts `tunnel-client.exe` with window style `0`, waits for the process, and returns its exit code to Task Scheduler.
+
+The wrapper intentionally contains no runtime API key, GitHub token, or tunnel ID. It expects the existing `gh-cli` profile and the persistent user-level `CONTROL_PLANE_API_KEY` environment variable.
+
+Copy the wrapper to the Tunnel Client directory:
+
+```powershell
+Copy-Item "C:\Workspace\onprem-gh-cli-mcp-server\scripts\windows\run-gh-cli-mcp-tunnel.vbs" "C:\Apps\TunnelClient\run-gh-cli-mcp-tunnel.vbs" -Force
+```
+
+Before registering the task, confirm that the persistent user environment contains the key without printing its value:
+
+```powershell
+if ([Environment]::GetEnvironmentVariable("CONTROL_PLANE_API_KEY","User") -or [Environment]::GetEnvironmentVariable("CONTROL_PLANE_API_KEY","Machine")) { "Persistent key is set" } else { "Persistent key is not set" }
+```
+
+If it is not set, enter the runtime key without placing it in PowerShell history and save it for the current Windows user. Windows stores a user environment variable in that user's registry profile; use an organization-approved secret store instead when policy requires stronger protection.
+
+```powershell
+$secureKey=Read-Host "Runtime API Key" -AsSecureString; [Environment]::SetEnvironmentVariable("CONTROL_PLANE_API_KEY",[System.Net.NetworkCredential]::new("",$secureKey).Password,"User")
+```
+
+Sign out and back in before relying on the scheduled task's inherited environment, or restart the Task Scheduler service according to local operations policy. Do not paste the runtime key into the VBS file, task arguments, repository, logs, or ChatGPT.
+
+Register the at-logon task for the current Windows user:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File "C:\Workspace\onprem-gh-cli-mcp-server\scripts\windows\install-gh-cli-tunnel-task.ps1"
+```
+
+Stop any manually running `gh-cli` tunnel before starting the task, then run and inspect it:
+
+```powershell
+Start-ScheduledTask -TaskName "OpenAI Secure MCP Tunnel - GH CLI"
+```
+
+```powershell
+Get-ScheduledTask -TaskName "OpenAI Secure MCP Tunnel - GH CLI" | Select-Object TaskName,State
+```
+
+```powershell
+Invoke-WebRequest "http://127.0.0.1:8081/readyz" -UseBasicParsing | Select-Object StatusCode,Content
+```
+
+The task uses `wscript.exe`, so no console window is shown. It runs at user logon, retries three times at one-minute intervals after a failure, and rejects a second concurrent task instance. The tunnel log is written to `C:\Apps\TunnelClient\gh-cli-tunnel-client.log`.
