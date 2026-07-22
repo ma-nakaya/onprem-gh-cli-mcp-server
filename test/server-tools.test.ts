@@ -44,6 +44,12 @@ describe("MCP tool registration", () => {
       }
       expect(tools.has("delete_label")).toBe(false);
       expect(tools.has("delete_milestone")).toBe(false);
+      for (const name of ["create_project", "update_project"]) {
+        expect(tools.has(name)).toBe(true);
+        expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
+      }
+      expect(tools.has("delete_project")).toBe(false);
+      expect(tools.has("publish_project")).toBe(false);
       expect(tools.get("run_gh")?.annotations?.readOnlyHint).toBe(true);
     } finally {
       await client.close();

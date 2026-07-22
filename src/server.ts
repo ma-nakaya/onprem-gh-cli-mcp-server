@@ -4,11 +4,12 @@ import { appendAuditRecord } from "./audit-log.js";
 import type { Config } from "./config.js";
 import { runGh } from "./gh-runner.js";
 import type { RunGhOptions } from "./gh-runner.js";
-import { assertHostAllowed, assertRepositoryAllowed, assertSafeGhArguments } from "./policy.js";
+import { assertHostAllowed, assertOwnerAllowed, assertRepositoryAllowed, assertSafeGhArguments } from "./policy.js";
 import { assertReviewBody, pullRequestReviewSummary, pullRequestSummary } from "./pull-request.js";
 import { assertDraftRelease, releaseIdentifier, releaseSummary } from "./release.js";
 import { assertActiveWorkflow, isWorkflowIdentifier, normalizeWorkflowInputs, workflowSummary } from "./workflow.js";
 import { isLabelColor, isUtcTimestamp, labelSummary, milestoneIdentifier, milestoneSummary } from "./repository-metadata.js";
+import { buildUpdateProjectMutation, graphqlProject, ownerNodeId, projectIdentifier, projectSummary } from "./project.js";
 
 function response(value: unknown) {
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
@@ -35,7 +36,9 @@ async function assertPullRequest(repository: string, pullRequestNumber: number, 
 interface AuditTarget {
   tool: string;
   hostname: string;
-  repository: string;
+  repository?: string;
+  owner?: string;
+  projectId?: string;
   issueNumber?: number;
   pullRequestNumber?: number;
   releaseId?: number;
@@ -162,6 +165,8 @@ export function createServer(config: Config): McpServer {
   const labelNameSchema = z.string().trim().min(1).max(50);
   const labelColorSchema = z.string().refine(isLabelColor, "Label color must be exactly six hexadecimal characters.");
   const dueOnSchema = z.string().refine(isUtcTimestamp, "Milestone dueOn must be a valid UTC ISO 8601 timestamp.");
+  const ownerLoginSchema = z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9_.-]+$/);
+  const projectIdSchema = z.string().trim().min(8).max(128).regex(/^PVT_[A-Za-z0-9_-]+$/);
 
   server.registerTool("list_issues", {
     description: "List issues in an allowed repository.",
@@ -561,6 +566,84 @@ export function createServer(config: Config): McpServer {
       config,
     );
     return response({ milestone: milestoneSummary(operation.value), audit: operation.audit });
+  });
+
+  server.registerTool("create_project", {
+    description: "Create a private GitHub Projects v2 project for an allowed user or organization. This tool cannot make the project public or delete it.",
+    inputSchema: {
+      hostname: z.string().min(1).default("github.com"),
+      ownerType: z.enum(["user", "organization"]),
+      owner: ownerLoginSchema,
+      title: z.string().trim().min(1).max(256),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  }, async ({ hostname, ownerType, owner, title }) => {
+    assertHostAllowed(hostname, config);
+    assertOwnerAllowed(owner, config);
+    const normalizedHostname = hostname.trim().toLowerCase();
+    const normalizedOwner = owner.trim().toLowerCase();
+    const ownerEndpoint = ownerType === "organization" ? `orgs/${normalizedOwner}` : `users/${normalizedOwner}`;
+    const ownerResponse = await jsonGh(["api", ownerEndpoint, "--hostname", normalizedHostname], config);
+    const ownerId = ownerNodeId(ownerResponse);
+    const query = `mutation($ownerId: ID!, $title: String!) {
+      createProjectV2(input: { ownerId: $ownerId, title: $title }) {
+        projectV2 { id number title url closed public }
+      }
+    }`;
+    const operation = await auditedJsonGh(
+      { tool: "create_project", hostname: normalizedHostname, owner: normalizedOwner },
+      ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+      { query, variables: { ownerId, title: title.trim() } },
+      config,
+      (value) => ({ projectId: projectIdentifier(graphqlProject(value, "createProjectV2")) }),
+    );
+    const project = graphqlProject(operation.value, "createProjectV2");
+    return response({ project: projectSummary(project), audit: operation.audit });
+  });
+
+  server.registerTool("update_project", {
+    description: "Update a GitHub Projects v2 title, descriptions, or reversible open/closed state. This tool cannot change visibility or delete a project.",
+    inputSchema: {
+      hostname: z.string().min(1).default("github.com"),
+      owner: ownerLoginSchema.describe("Allowed owner used as the authorization scope"),
+      projectId: projectIdSchema,
+      title: z.string().trim().min(1).max(256).optional(),
+      shortDescription: z.string().max(256).optional(),
+      readme: z.string().max(65_536).optional(),
+      closed: z.boolean().optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  }, async ({ hostname, owner, projectId, title, shortDescription, readme, closed }) => {
+    assertHostAllowed(hostname, config);
+    assertOwnerAllowed(owner, config);
+    const normalizedHostname = hostname.trim().toLowerCase();
+    const normalizedOwner = owner.trim().toLowerCase();
+    const normalizedProjectId = projectId.trim();
+    const update = buildUpdateProjectMutation(normalizedProjectId, {
+      ...(title === undefined ? {} : { title: title.trim() }),
+      ...(shortDescription === undefined ? {} : { shortDescription }),
+      ...(readme === undefined ? {} : { readme }),
+      ...(closed === undefined ? {} : { closed }),
+    });
+
+    const readQuery = `query($projectId: ID!) {
+      node(id: $projectId) { __typename ... on ProjectV2 { id number title url closed public } }
+    }`;
+    const existing = await jsonGh(
+      ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+      config,
+      { stdin: JSON.stringify({ query: readQuery, variables: { projectId: normalizedProjectId } }) },
+    );
+    graphqlProject(existing, "node");
+
+    const operation = await auditedJsonGh(
+      { tool: "update_project", hostname: normalizedHostname, owner: normalizedOwner, projectId: normalizedProjectId },
+      ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+      update,
+      config,
+    );
+    const project = graphqlProject(operation.value, "updateProjectV2");
+    return response({ project: projectSummary(project), audit: operation.audit });
   });
 
   server.registerTool("update_release", {

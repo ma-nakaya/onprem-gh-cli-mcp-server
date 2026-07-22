@@ -155,4 +155,32 @@ describe("audit log", () => {
     expect(records[1].milestoneNumber).toBe(7);
     expect(JSON.stringify(records)).not.toContain("description content");
   });
+
+  it("records an owner and project ID without project content", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "onprem-gh-cli-mcp-"));
+    temporaryDirectories.push(directory);
+    const auditLogPath = join(directory, "audit.jsonl");
+
+    await appendAuditRecord(auditLogPath, {
+      timestamp: "2026-07-22T05:10:00.000Z",
+      tool: "update_project",
+      hostname: "github.com",
+      owner: "ma-nakaya",
+      projectId: "PVT_example123",
+      outcome: "succeeded",
+      durationMs: 15,
+    });
+
+    const text = await readFile(auditLogPath, "utf8");
+    expect(JSON.parse(text.trim())).toEqual({
+      timestamp: "2026-07-22T05:10:00.000Z",
+      tool: "update_project",
+      hostname: "github.com",
+      owner: "ma-nakaya",
+      projectId: "PVT_example123",
+      outcome: "succeeded",
+      durationMs: 15,
+    });
+    expect(text).not.toContain("project readme");
+  });
 });

@@ -42,6 +42,19 @@ export function assertRepositoryAllowed(repository: string, config: Config): voi
   if (config.allowedOwners.size > 0 && !config.allowedOwners.has(owner)) throw new Error(`Repository owner is not allowed: ${owner}`);
 }
 
+export function assertOwnerAllowed(owner: string, config: Config): void {
+  const normalized = owner.trim().toLowerCase();
+  if (!/^[a-z0-9_.-]+$/i.test(normalized)) throw new Error("Owner must be a GitHub user or organization login.");
+  if (config.allowedOwners.size > 0) {
+    if (!config.allowedOwners.has(normalized)) throw new Error(`Owner is not allowed: ${owner}`);
+    return;
+  }
+  if (config.allowedRepositories.size > 0) {
+    const ownerIsRepresented = [...config.allowedRepositories].some((repository) => repository.split("/", 1)[0] === normalized);
+    if (!ownerIsRepresented) throw new Error(`Owner is not allowed by the repository allowlist: ${owner}`);
+  }
+}
+
 export function assertHostAllowed(host: string, config: Config): void {
   if (!config.allowedHosts.has(host.trim().toLowerCase())) throw new Error(`GitHub host is not allowed: ${host}`);
 }

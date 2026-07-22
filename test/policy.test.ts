@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Config } from "../src/config.js";
-import { assertRepositoryAllowed, assertSafeGhArguments } from "../src/policy.js";
+import { assertOwnerAllowed, assertRepositoryAllowed, assertSafeGhArguments } from "../src/policy.js";
 
 const config: Config = {
   ghPath: "gh", allowedHosts: new Set(["github.com"]), allowedOwners: new Set(["ma-nakaya"]),
@@ -36,5 +36,12 @@ describe("read-only policy", () => {
   it("enforces owner allowlists", () => {
     expect(() => assertRepositoryAllowed("ma-nakaya/example", config)).not.toThrow();
     expect(() => assertRepositoryAllowed("someone-else/example", config)).toThrow(/owner is not allowed/);
+  });
+  it("enforces owner-wide operation allowlists", () => {
+    expect(() => assertOwnerAllowed("ma-nakaya", config)).not.toThrow();
+    expect(() => assertOwnerAllowed("someone-else", config)).toThrow(/not allowed/);
+    const repositoryScoped = { ...config, allowedOwners: new Set<string>(), allowedRepositories: new Set(["ma-nakaya/example"]) };
+    expect(() => assertOwnerAllowed("ma-nakaya", repositoryScoped)).not.toThrow();
+    expect(() => assertOwnerAllowed("someone-else", repositoryScoped)).toThrow(/repository allowlist/);
   });
 });
