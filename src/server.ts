@@ -6,6 +6,7 @@ import { runGh } from "./gh-runner.js";
 import type { RunGhOptions } from "./gh-runner.js";
 import { assertHostAllowed, assertRepositoryAllowed, assertSafeGhArguments } from "./policy.js";
 import { assertReviewBody, pullRequestReviewSummary, pullRequestSummary } from "./pull-request.js";
+import { assertDraftRelease, releaseIdentifier, releaseSummary } from "./release.js";
 
 function response(value: unknown) {
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
@@ -35,6 +36,7 @@ interface AuditTarget {
   repository: string;
   issueNumber?: number;
   pullRequestNumber?: number;
+  releaseId?: number;
 }
 
 async function auditedJsonGh(
@@ -42,6 +44,7 @@ async function auditedJsonGh(
   args: string[],
   payload: Record<string, unknown>,
   config: Config,
+  completedTarget?: (value: unknown) => Partial<AuditTarget>,
 ): Promise<{ value: unknown; audit: { started: true; completed: boolean } }> {
   const startedAt = Date.now();
   await appendAuditRecord(config.auditLogPath, {
@@ -51,10 +54,11 @@ async function auditedJsonGh(
   });
   try {
     const value = await jsonGh(args, config, { stdin: JSON.stringify(payload) });
+    const finalTarget = completedTarget === undefined ? target : { ...target, ...completedTarget(value) };
     let completed = true;
     try {
       await appendAuditRecord(config.auditLogPath, {
-        ...target,
+        ...finalTarget,
         outcome: "succeeded",
         durationMs: Date.now() - startedAt,
       });
@@ -362,6 +366,82 @@ export function createServer(config: Config): McpServer {
   }, async ({ repository, limit }) => {
     assertRepositoryAllowed(repository, config);
     return response(await jsonGh(["run", "list", "--repo", repository, "--limit", String(limit), "--json", "databaseId,name,displayTitle,status,conclusion,event,headBranch,createdAt,updatedAt,url"], config));
+  });
+
+  server.registerTool("create_release", {
+    description: "Create a draft release in an allowed repository. This tool cannot publish a release. The release body is sent through stdin and is not written to the audit log.",
+    inputSchema: {
+      ...writeContextSchema,
+      tagName: gitRefSchema.describe("Git tag name for the draft release"),
+      targetCommitish: gitRefSchema.optional().describe("Branch or commit SHA used when creating a new tag"),
+      name: z.string().max(256).optional(),
+      body: z.string().max(125_000).optional(),
+      prerelease: z.boolean().default(false),
+      generateReleaseNotes: z.boolean().default(false),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  }, async ({ repository, hostname, tagName, targetCommitish, name, body, prerelease, generateReleaseNotes }) => {
+    assertHostAllowed(hostname, config);
+    assertRepositoryAllowed(repository, config);
+    const normalizedRepository = repository.trim();
+    const normalizedHostname = hostname.trim().toLowerCase();
+    const payload: Record<string, unknown> = {
+      tag_name: tagName.trim(),
+      draft: true,
+      prerelease,
+      generate_release_notes: generateReleaseNotes,
+    };
+    if (targetCommitish !== undefined) payload.target_commitish = targetCommitish.trim();
+    if (name !== undefined) payload.name = name;
+    if (body !== undefined) payload.body = body;
+    const operation = await auditedJsonGh(
+      { tool: "create_release", hostname: normalizedHostname, repository: normalizedRepository },
+      ["api", `repos/${normalizedRepository}/releases`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+      payload,
+      config,
+      (value) => ({ releaseId: releaseIdentifier(value) }),
+    );
+    return response({ release: releaseSummary(operation.value), audit: operation.audit });
+  });
+
+  server.registerTool("update_release", {
+    description: "Update metadata for an existing draft release. Published releases cannot be changed or published by this tool.",
+    inputSchema: {
+      ...writeContextSchema,
+      releaseId: z.number().int().positive(),
+      tagName: gitRefSchema.optional(),
+      targetCommitish: gitRefSchema.optional(),
+      name: z.string().max(256).optional(),
+      body: z.string().max(125_000).optional(),
+      prerelease: z.boolean().optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  }, async ({ repository, hostname, releaseId, tagName, targetCommitish, name, body, prerelease }) => {
+    assertHostAllowed(hostname, config);
+    assertRepositoryAllowed(repository, config);
+    const normalizedRepository = repository.trim();
+    const normalizedHostname = hostname.trim().toLowerCase();
+    const payload: Record<string, unknown> = {};
+    if (tagName !== undefined) payload.tag_name = tagName.trim();
+    if (targetCommitish !== undefined) payload.target_commitish = targetCommitish.trim();
+    if (name !== undefined) payload.name = name;
+    if (body !== undefined) payload.body = body;
+    if (prerelease !== undefined) payload.prerelease = prerelease;
+    if (Object.keys(payload).length === 0) {
+      throw new Error("At least one release field must be provided.");
+    }
+    const existing = await jsonGh(
+      ["api", `repos/${normalizedRepository}/releases/${releaseId}`, "--hostname", normalizedHostname],
+      config,
+    );
+    assertDraftRelease(existing, releaseId);
+    const operation = await auditedJsonGh(
+      { tool: "update_release", hostname: normalizedHostname, repository: normalizedRepository, releaseId },
+      ["api", `repos/${normalizedRepository}/releases/${releaseId}`, "--hostname", normalizedHostname, "--method", "PATCH", "--input", "-"],
+      payload,
+      config,
+    );
+    return response({ release: releaseSummary(operation.value), audit: operation.audit });
   });
 
   server.registerTool("run_gh", {
