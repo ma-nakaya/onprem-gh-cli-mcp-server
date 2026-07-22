@@ -5,6 +5,9 @@ import { join } from "node:path";
 
 const expectedTools = [
   "get_auth_status",
+  "get_branch",
+  "create_branch",
+  "commit_files",
   "list_organizations",
   "list_repositories",
   "list_issues",
@@ -42,6 +45,7 @@ const forbiddenTools = [
   "delete_project",
   "delete_project_item",
   "create_project_field",
+  "force_push_branch",
   "show_token",
 ];
 
