@@ -96,4 +96,33 @@ describe("audit log", () => {
     });
     expect(text).not.toContain("release notes");
   });
+
+  it("records a workflow target without workflow inputs", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "onprem-gh-cli-mcp-"));
+    temporaryDirectories.push(directory);
+    const auditLogPath = join(directory, "audit.jsonl");
+
+    await appendAuditRecord(auditLogPath, {
+      timestamp: "2026-07-22T04:30:00.000Z",
+      tool: "dispatch_workflow",
+      hostname: "github.com",
+      repository: "ma-nakaya/example",
+      workflow: "ci.yml",
+      outcome: "succeeded",
+      durationMs: 12,
+    });
+
+    const text = await readFile(auditLogPath, "utf8");
+    expect(JSON.parse(text.trim())).toEqual({
+      timestamp: "2026-07-22T04:30:00.000Z",
+      tool: "dispatch_workflow",
+      hostname: "github.com",
+      repository: "ma-nakaya/example",
+      workflow: "ci.yml",
+      outcome: "succeeded",
+      durationMs: 12,
+    });
+    expect(text).not.toContain("environment");
+    expect(text).not.toContain("production");
+  });
 });
