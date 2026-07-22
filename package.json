@@ -9,7 +9,8 @@
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "start": "node dist/cli.js"
+    "start": "node dist/cli.js",
+    "smoke:stdio": "node scripts/smoke-stdio.mjs"
   },
   "engines": { "node": ">=20" },
   "keywords": ["mcp", "github", "github-cli", "on-premises"],
