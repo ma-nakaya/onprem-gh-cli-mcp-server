@@ -11,6 +11,7 @@ export interface AuditRecord {
   issueNumber?: number;
   pullRequestNumber?: number;
   releaseId?: number;
+  workflow?: string;
   outcome: AuditOutcome;
   durationMs: number;
 }
@@ -25,6 +26,7 @@ export async function appendAuditRecord(auditLogPath: string, record: AuditRecor
     ...(record.issueNumber === undefined ? {} : { issueNumber: record.issueNumber }),
     ...(record.pullRequestNumber === undefined ? {} : { pullRequestNumber: record.pullRequestNumber }),
     ...(record.releaseId === undefined ? {} : { releaseId: record.releaseId }),
+    ...(record.workflow === undefined ? {} : { workflow: record.workflow }),
     outcome: record.outcome,
     durationMs: record.durationMs,
   });
