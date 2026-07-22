@@ -38,6 +38,12 @@ describe("MCP tool registration", () => {
       expect(tools.has("dispatch_workflow")).toBe(true);
       expect(tools.get("dispatch_workflow")?.annotations?.readOnlyHint).toBe(false);
       expect(tools.get("dispatch_workflow")?.annotations?.destructiveHint).toBe(true);
+      for (const name of ["create_label", "update_label", "create_milestone", "update_milestone"]) {
+        expect(tools.has(name)).toBe(true);
+        expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
+      }
+      expect(tools.has("delete_label")).toBe(false);
+      expect(tools.has("delete_milestone")).toBe(false);
       expect(tools.get("run_gh")?.annotations?.readOnlyHint).toBe(true);
     } finally {
       await client.close();
