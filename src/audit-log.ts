@@ -10,6 +10,8 @@ export interface AuditRecord {
   repository?: string;
   owner?: string;
   projectId?: string;
+  projectItemId?: string;
+  projectFieldId?: string;
   issueNumber?: number;
   pullRequestNumber?: number;
   releaseId?: number;
@@ -29,6 +31,8 @@ export async function appendAuditRecord(auditLogPath: string, record: AuditRecor
     ...(record.repository === undefined ? {} : { repository: record.repository }),
     ...(record.owner === undefined ? {} : { owner: record.owner }),
     ...(record.projectId === undefined ? {} : { projectId: record.projectId }),
+    ...(record.projectItemId === undefined ? {} : { projectItemId: record.projectItemId }),
+    ...(record.projectFieldId === undefined ? {} : { projectFieldId: record.projectFieldId }),
     ...(record.issueNumber === undefined ? {} : { issueNumber: record.issueNumber }),
     ...(record.pullRequestNumber === undefined ? {} : { pullRequestNumber: record.pullRequestNumber }),
     ...(record.releaseId === undefined ? {} : { releaseId: record.releaseId }),
