@@ -19,6 +19,10 @@ describe("read-only policy", () => {
     expect(() => assertSafeGhArguments(["pr", "edit", "1"])).toThrow(/not allowed/);
     expect(() => assertSafeGhArguments(["pr", "review", "1", "--approve"])).toThrow(/not allowed/);
     expect(() => assertSafeGhArguments(["pr", "comment", "1", "--body", "example"])).toThrow(/not allowed/);
+    expect(() => assertSafeGhArguments(["release", "create", "v1.0.0"])).toThrow(/not allowed/);
+    expect(() => assertSafeGhArguments(["release", "edit", "v1.0.0"])).toThrow(/not allowed/);
+    expect(() => assertSafeGhArguments(["release", "upload", "v1.0.0", "asset.zip"])).toThrow(/not allowed/);
+    expect(() => assertSafeGhArguments(["release", "delete", "v1.0.0"])).toThrow(/not allowed/);
   });
   it("blocks token disclosure", () => {
     expect(() => assertSafeGhArguments(["auth", "token"])).toThrow();
