@@ -68,4 +68,32 @@ describe("audit log", () => {
     });
     expect(text).not.toContain("review content");
   });
+
+  it("records a release target without release content", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "onprem-gh-cli-mcp-"));
+    temporaryDirectories.push(directory);
+    const auditLogPath = join(directory, "audit.jsonl");
+
+    await appendAuditRecord(auditLogPath, {
+      timestamp: "2026-07-22T04:00:00.000Z",
+      tool: "update_release",
+      hostname: "github.com",
+      repository: "ma-nakaya/example",
+      releaseId: 99,
+      outcome: "succeeded",
+      durationMs: 21,
+    });
+
+    const text = await readFile(auditLogPath, "utf8");
+    expect(JSON.parse(text.trim())).toEqual({
+      timestamp: "2026-07-22T04:00:00.000Z",
+      tool: "update_release",
+      hostname: "github.com",
+      repository: "ma-nakaya/example",
+      releaseId: 99,
+      outcome: "succeeded",
+      durationMs: 21,
+    });
+    expect(text).not.toContain("release notes");
+  });
 });
