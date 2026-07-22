@@ -9,6 +9,7 @@ export interface AuditRecord {
   hostname: string;
   repository: string;
   issueNumber?: number;
+  pullRequestNumber?: number;
   outcome: AuditOutcome;
   durationMs: number;
 }
@@ -21,6 +22,7 @@ export async function appendAuditRecord(auditLogPath: string, record: AuditRecor
     hostname: record.hostname,
     repository: record.repository,
     ...(record.issueNumber === undefined ? {} : { issueNumber: record.issueNumber }),
+    ...(record.pullRequestNumber === undefined ? {} : { pullRequestNumber: record.pullRequestNumber }),
     outcome: record.outcome,
     durationMs: record.durationMs,
   });
