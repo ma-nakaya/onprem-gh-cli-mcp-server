@@ -3,7 +3,7 @@
 オンプレPCにインストールされたGitHub CLI (`gh`)を、MCPクライアントから安全に利用するためのstdio MCPサーバーです。APIの認証情報をMCPクライアントへ渡さず、ローカルの`gh auth`認証を利用します。
 
 > [!IMPORTANT]
-> 現在はPhase 2aです。読み取り操作に加え、型付きツールによるIssueの作成・更新・コメントを提供します。Repository削除、PRマージ、Secret変更などの破壊・管理操作は未実装です。
+> 現在はPhase 2bです。読み取り操作に加え、型付きツールによるIssueとPull Requestの作成・更新・コメント・レビューを提供します。Repository削除、PRマージ、Secret変更などの破壊・管理操作は未実装です。
 
 ## 提供ツール
 
@@ -25,13 +25,22 @@
 
 Issue本文とコメントはコマンドライン引数へ載せず、`gh api --input -`の標準入力としてJSONで渡します。書き込み操作は型付きツールだけに限定し、`run_gh`は読み取り専用のままです。
 
+### Pull Request書き込み
+
+- `create_pull_request`: Pull Requestを作成（既定はDraft）
+- `update_pull_request`: タイトル、本文、open/closed状態を更新
+- `comment_pull_request`: Conversationへコメントを追加
+- `review_pull_request`: Approve、Request changes、Commentレビューを送信
+
+Pull Requestのタイトル、本文、コメント、レビュー本文も標準入力で渡し、監査ログへ保存しません。これらのツールはPull Requestをマージできません。
+
 ## 必要環境
 
 - Node.js 20以上
 - GitHub CLI
 - 事前に`gh auth login`が完了していること
 
-Issue書き込みには、対象RepositoryへのIssue書き込み権限を持つGitHub CLI認証が必要です。
+Issue・Pull Request書き込みには、対象Repositoryへの書き込み権限を持つGitHub CLI認証が必要です。
 
 ## 起動
 
@@ -70,7 +79,7 @@ node dist/cli.js
 
 ## 監査ログ
 
-Issue書き込みの開始と完了をJSON Lines形式で記録します。
+Issue・Pull Request書き込みの開始と完了をJSON Lines形式で記録します。
 
 記録対象:
 
@@ -79,6 +88,7 @@ Issue書き込みの開始と完了をJSON Lines形式で記録します。
 - hostname
 - repository
 - issueNumber（対象が存在する場合）
+- pullRequestNumber（対象が存在する場合）
 - outcome (`started` / `succeeded` / `failed`)
 - durationMs
 
@@ -87,6 +97,8 @@ Issue書き込みの開始と完了をJSON Lines形式で記録します。
 - Issueタイトル
 - Issue本文
 - コメント本文
+- Pull Requestタイトル・本文
+- Pull Requestコメント・レビュー本文
 - Token、Secret
 - GitHub CLIの標準出力・標準エラー全文
 
@@ -111,17 +123,20 @@ mcp:
 - `run_gh`では書き込み系サブコマンドを拒否
 - 書き込み操作は入力スキーマを持つ専用ツールだけに限定
 - Issue本文とコメントは標準入力で渡し、プロセス引数へ載せない
+- Pull Requestのタイトル、本文、コメント、レビュー本文も標準入力で渡す
 - 子プロセスへ渡す環境変数を限定
 - GitHub Tokenらしい出力をマスク
 - 実行時間と出力量を制限
 - Repository/Owner/Hostの許可リストに対応
-- 監査ログへIssue本文、コメント本文、Token、Secretを保存しない
+- 監査ログへIssue・Pull Requestの本文、コメント、レビュー本文、Token、Secretを保存しない
+- Pull Requestマージ機能を提供しない
 
 ## 現在の実装範囲
 
 - Phase 1: 基盤、読み取り、Organization一覧、許可リスト、CI、実機確認
 - Phase 2a: Issue作成・更新・コメント、JSONL監査ログ
-- 未実装: PR・Release作成、Workflow Dispatch、Project、削除、PRマージ、Secret、二段階承認
+- Phase 2b: Pull Request作成・更新・会話コメント・レビュー
+- 未実装: Release作成、Workflow Dispatch、Project、Label、Milestone、削除、PRマージ、Secret、二段階承認
 
 ## 開発
 
