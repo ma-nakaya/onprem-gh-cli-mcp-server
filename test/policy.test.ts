@@ -23,6 +23,9 @@ describe("read-only policy", () => {
     expect(() => assertSafeGhArguments(["release", "edit", "v1.0.0"])).toThrow(/not allowed/);
     expect(() => assertSafeGhArguments(["release", "upload", "v1.0.0", "asset.zip"])).toThrow(/not allowed/);
     expect(() => assertSafeGhArguments(["release", "delete", "v1.0.0"])).toThrow(/not allowed/);
+    expect(() => assertSafeGhArguments(["workflow", "run", "ci.yml"])).toThrow(/not allowed/);
+    expect(() => assertSafeGhArguments(["run", "rerun", "123"])).toThrow(/not allowed/);
+    expect(() => assertSafeGhArguments(["run", "cancel", "123"])).toThrow(/not allowed/);
   });
   it("blocks token disclosure", () => {
     expect(() => assertSafeGhArguments(["auth", "token"])).toThrow();
