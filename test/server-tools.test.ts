@@ -35,6 +35,9 @@ describe("MCP tool registration", () => {
       expect(tools.has("merge_pull_request")).toBe(false);
       expect(tools.has("publish_release")).toBe(false);
       expect(tools.has("delete_release")).toBe(false);
+      expect(tools.has("dispatch_workflow")).toBe(true);
+      expect(tools.get("dispatch_workflow")?.annotations?.readOnlyHint).toBe(false);
+      expect(tools.get("dispatch_workflow")?.annotations?.destructiveHint).toBe(true);
       expect(tools.get("run_gh")?.annotations?.readOnlyHint).toBe(true);
     } finally {
       await client.close();
