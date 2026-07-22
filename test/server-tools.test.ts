@@ -60,6 +60,13 @@ describe("MCP tool registration", () => {
       }
       expect(tools.has("delete_project_item")).toBe(false);
       expect(tools.has("create_project_field")).toBe(false);
+      expect(tools.get("get_branch")?.annotations?.readOnlyHint).toBe(true);
+      for (const name of ["create_branch", "commit_files"]) {
+        expect(tools.has(name)).toBe(true);
+        expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
+      }
+      expect(tools.get("commit_files")?.annotations?.destructiveHint).toBe(true);
+      expect(tools.has("force_push_branch")).toBe(false);
       expect(tools.get("run_gh")?.annotations?.readOnlyHint).toBe(true);
     } finally {
       await client.close();

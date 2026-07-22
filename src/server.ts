@@ -10,6 +10,7 @@ import { assertDraftRelease, releaseIdentifier, releaseSummary } from "./release
 import { assertActiveWorkflow, isWorkflowIdentifier, normalizeWorkflowInputs, workflowSummary } from "./workflow.js";
 import { isLabelColor, isUtcTimestamp, labelSummary, milestoneIdentifier, milestoneSummary } from "./repository-metadata.js";
 import { assertProjectOwner, buildUpdateProjectMutation, graphqlProject, graphqlProjectItem, ownerNodeId, projectFieldValue, projectFieldsSummary, projectIdentifier, projectItemsSummary, projectItemSummary, projectSummary } from "./project.js";
+import { assertRepositoryPath, assertWritableBranch, branchHeadSha, branchSummary, commitTreeSha, encodeGitRef, gitObjectSha } from "./git-data.js";
 
 function response(value: unknown) {
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
@@ -49,6 +50,9 @@ interface AuditTarget {
   projectId?: string;
   projectItemId?: string;
   projectFieldId?: string;
+  branch?: string;
+  commitSha?: string;
+  fileCount?: number;
   issueNumber?: number;
   pullRequestNumber?: number;
   releaseId?: number;
@@ -179,6 +183,95 @@ export function createServer(config: Config): McpServer {
   const projectIdSchema = z.string().trim().min(8).max(128).regex(/^PVT_[A-Za-z0-9_-]+$/);
   const projectItemIdSchema = z.string().trim().min(8).max(128).regex(/^PVTI_[A-Za-z0-9_-]+$/);
   const projectFieldIdSchema = z.string().trim().min(8).max(256).regex(/^[A-Za-z0-9_-]+$/);
+  const branchNameSchema = z.string().trim().min(1).max(255).regex(/^(?!\/)(?!.*(?:\.\.|\/\/|@\{|\\|\s))[A-Za-z0-9._\/-]+(?<![\/.])$/);
+  const commitShaSchema = z.string().trim().regex(/^[0-9a-f]{40}$/);
+  const repositoryPathSchema = z.string().trim().min(1).max(1024).refine((value) => {
+    try { assertRepositoryPath(value); return true; } catch { return false; }
+  }, "Repository file path must be a normalized relative path.");
+
+  server.registerTool("get_branch", {
+    description: "Read the current commit SHA for a branch in an allowed repository.",
+    inputSchema: { ...writeContextSchema, branch: branchNameSchema },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+  }, async ({ repository, hostname, branch }) => {
+    assertHostAllowed(hostname, config); assertRepositoryAllowed(repository, config);
+    const normalizedHostname = hostname.trim().toLowerCase();
+    const value = await jsonGh(["api", `repos/${repository.trim()}/git/ref/heads/${encodeGitRef(branch.trim())}`, "--hostname", normalizedHostname], config);
+    return response({ branch: branchSummary(value) });
+  });
+
+  server.registerTool("create_branch", {
+    description: "Create a feature branch from an existing branch. Existing branches are never overwritten.",
+    inputSchema: { ...writeContextSchema, branch: branchNameSchema, sourceBranch: branchNameSchema.default("main") },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  }, async ({ repository, hostname, branch, sourceBranch }) => {
+    assertHostAllowed(hostname, config); assertRepositoryAllowed(repository, config); assertWritableBranch(branch);
+    const normalizedRepository = repository.trim(); const normalizedHostname = hostname.trim().toLowerCase();
+    const source = await jsonGh(["api", `repos/${normalizedRepository}/git/ref/heads/${encodeGitRef(sourceBranch.trim())}`, "--hostname", normalizedHostname], config);
+    const sourceSha = branchHeadSha(source);
+    const operation = await auditedJsonGh(
+      { tool: "create_branch", hostname: normalizedHostname, repository: normalizedRepository, branch: branch.trim() },
+      ["api", `repos/${normalizedRepository}/git/refs`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+      { ref: `refs/heads/${branch.trim()}`, sha: sourceSha }, config,
+    );
+    return response({ branch: branchSummary(operation.value), audit: operation.audit });
+  });
+
+  server.registerTool("commit_files", {
+    description: "Create one atomic commit containing multiple file creates, updates, or deletes, then advance a feature branch without force-pushing. File contents are not audited.",
+    inputSchema: {
+      ...writeContextSchema,
+      branch: branchNameSchema,
+      expectedHeadSha: commitShaSchema.describe("Current branch head SHA used for optimistic concurrency"),
+      message: z.string().trim().min(1).max(2048),
+      files: z.array(z.object({
+        path: repositoryPathSchema,
+        operation: z.enum(["upsert", "delete"]),
+        content: z.string().max(1_000_000).optional(),
+      }).superRefine((file, context) => {
+        if (file.operation === "upsert" && file.content === undefined) context.addIssue({ code: "custom", message: "Upsert operations require content." });
+        if (file.operation === "delete" && file.content !== undefined) context.addIssue({ code: "custom", message: "Delete operations must not include content." });
+      })).min(1).max(100),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  }, async ({ repository, hostname, branch, expectedHeadSha, message, files }) => {
+    assertHostAllowed(hostname, config); assertRepositoryAllowed(repository, config); assertWritableBranch(branch);
+    const paths = files.map((file) => file.path);
+    if (new Set(paths).size !== paths.length) throw new Error("Each repository path may appear only once per commit.");
+    const normalizedRepository = repository.trim(); const normalizedHostname = hostname.trim().toLowerCase();
+    const refPath = `repos/${normalizedRepository}/git/ref/heads/${encodeGitRef(branch.trim())}`;
+    const currentRef = await jsonGh(["api", refPath, "--hostname", normalizedHostname], config);
+    const actualHeadSha = branchHeadSha(currentRef);
+    if (actualHeadSha !== expectedHeadSha) throw new Error("Branch head changed. Fetch the branch again and rebuild the commit from the new head.");
+    const baseCommit = await jsonGh(["api", `repos/${normalizedRepository}/git/commits/${actualHeadSha}`, "--hostname", normalizedHostname], config);
+    const baseTree = commitTreeSha(baseCommit);
+    const tree: Record<string, unknown>[] = [];
+    for (const file of files) {
+      assertRepositoryPath(file.path);
+      if (file.operation === "delete") { tree.push({ path: file.path, mode: "100644", type: "blob", sha: null }); continue; }
+      const blob = await jsonGh(
+        ["api", `repos/${normalizedRepository}/git/blobs`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"], config,
+        { stdin: JSON.stringify({ content: file.content, encoding: "utf-8" }) },
+      );
+      tree.push({ path: file.path, mode: "100644", type: "blob", sha: gitObjectSha(blob, "Git blob") });
+    }
+    const newTree = await jsonGh(
+      ["api", `repos/${normalizedRepository}/git/trees`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"], config,
+      { stdin: JSON.stringify({ base_tree: baseTree, tree }) },
+    );
+    const newTreeSha = gitObjectSha(newTree, "Git tree");
+    const commit = await jsonGh(
+      ["api", `repos/${normalizedRepository}/git/commits`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"], config,
+      { stdin: JSON.stringify({ message: message.trim(), tree: newTreeSha, parents: [actualHeadSha] }) },
+    );
+    const commitSha = gitObjectSha(commit, "Git commit");
+    const operation = await auditedJsonGh(
+      { tool: "commit_files", hostname: normalizedHostname, repository: normalizedRepository, branch: branch.trim(), commitSha, fileCount: files.length },
+      ["api", `repos/${normalizedRepository}/git/refs/heads/${encodeGitRef(branch.trim())}`, "--hostname", normalizedHostname, "--method", "PATCH", "--input", "-"],
+      { sha: commitSha, force: false }, config,
+    );
+    return response({ branch: branchSummary(operation.value), commit: { sha: commitSha, fileCount: files.length }, audit: operation.audit });
+  });
 
   server.registerTool("list_issues", {
     description: "List issues in an allowed repository.",
