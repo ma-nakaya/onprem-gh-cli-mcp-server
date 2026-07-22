@@ -9,7 +9,7 @@ import { assertReviewBody, pullRequestReviewSummary, pullRequestSummary } from "
 import { assertDraftRelease, releaseIdentifier, releaseSummary } from "./release.js";
 import { assertActiveWorkflow, isWorkflowIdentifier, normalizeWorkflowInputs, workflowSummary } from "./workflow.js";
 import { isLabelColor, isUtcTimestamp, labelSummary, milestoneIdentifier, milestoneSummary } from "./repository-metadata.js";
-import { buildUpdateProjectMutation, graphqlProject, ownerNodeId, projectIdentifier, projectSummary } from "./project.js";
+import { assertProjectOwner, buildUpdateProjectMutation, graphqlProject, graphqlProjectItem, ownerNodeId, projectFieldValue, projectFieldsSummary, projectIdentifier, projectItemsSummary, projectItemSummary, projectSummary } from "./project.js";
 
 function response(value: unknown) {
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
@@ -33,12 +33,22 @@ async function assertPullRequest(repository: string, pullRequestNumber: number, 
   await jsonGh(["api", `repos/${repository}/pulls/${pullRequestNumber}`, "--hostname", hostname], config);
 }
 
+async function assertProjectAccess(projectId: string, owner: string, hostname: string, config: Config): Promise<void> {
+  const query = `query($projectId: ID!) { node(id: $projectId) { __typename ... on ProjectV2 { id owner { ... on User { login } ... on Organization { login } } } } }`;
+  const value = await jsonGh(["api", "graphql", "--hostname", hostname, "--method", "POST", "--input", "-"], config, {
+    stdin: JSON.stringify({ query, variables: { projectId } }),
+  });
+  assertProjectOwner(value, owner);
+}
+
 interface AuditTarget {
   tool: string;
   hostname: string;
   repository?: string;
   owner?: string;
   projectId?: string;
+  projectItemId?: string;
+  projectFieldId?: string;
   issueNumber?: number;
   pullRequestNumber?: number;
   releaseId?: number;
@@ -167,6 +177,8 @@ export function createServer(config: Config): McpServer {
   const dueOnSchema = z.string().refine(isUtcTimestamp, "Milestone dueOn must be a valid UTC ISO 8601 timestamp.");
   const ownerLoginSchema = z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9_.-]+$/);
   const projectIdSchema = z.string().trim().min(8).max(128).regex(/^PVT_[A-Za-z0-9_-]+$/);
+  const projectItemIdSchema = z.string().trim().min(8).max(128).regex(/^PVTI_[A-Za-z0-9_-]+$/);
+  const projectFieldIdSchema = z.string().trim().min(8).max(256).regex(/^[A-Za-z0-9_-]+$/);
 
   server.registerTool("list_issues", {
     description: "List issues in an allowed repository.",
@@ -627,14 +639,14 @@ export function createServer(config: Config): McpServer {
     });
 
     const readQuery = `query($projectId: ID!) {
-      node(id: $projectId) { __typename ... on ProjectV2 { id number title url closed public } }
+      node(id: $projectId) { __typename ... on ProjectV2 { id number title url closed public owner { ... on User { login } ... on Organization { login } } } }
     }`;
     const existing = await jsonGh(
       ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
       config,
       { stdin: JSON.stringify({ query: readQuery, variables: { projectId: normalizedProjectId } }) },
     );
-    graphqlProject(existing, "node");
+    assertProjectOwner(existing, normalizedOwner);
 
     const operation = await auditedJsonGh(
       { tool: "update_project", hostname: normalizedHostname, owner: normalizedOwner, projectId: normalizedProjectId },
@@ -644,6 +656,161 @@ export function createServer(config: Config): McpServer {
     );
     const project = graphqlProject(operation.value, "updateProjectV2");
     return response({ project: projectSummary(project), audit: operation.audit });
+  });
+
+  server.registerTool("list_project_items", {
+    description: "List Issue and Pull Request metadata in a GitHub Projects v2 project. Item field values and content bodies are not returned.",
+    inputSchema: {
+      hostname: z.string().min(1).default("github.com"),
+      owner: ownerLoginSchema,
+      projectId: projectIdSchema,
+      limit: z.number().int().min(1).max(100).default(30),
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+  }, async ({ hostname, owner, projectId, limit }) => {
+    assertHostAllowed(hostname, config);
+    assertOwnerAllowed(owner, config);
+    const normalizedHostname = hostname.trim().toLowerCase();
+    const query = `query($projectId: ID!, $limit: Int!) {
+      node(id: $projectId) { __typename ... on ProjectV2 {
+        id owner { ... on User { login } ... on Organization { login } } items(first: $limit) { totalCount nodes { id isArchived content {
+          __typename ... on Issue { title number url state repository { nameWithOwner } }
+          ... on PullRequest { title number url state repository { nameWithOwner } }
+        } } }
+      } }
+    }`;
+    const value = await jsonGh(
+      ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+      config,
+      { stdin: JSON.stringify({ query, variables: { projectId: projectId.trim(), limit } }) },
+    );
+    assertProjectOwner(value, owner);
+    return response(projectItemsSummary(value));
+  });
+
+  server.registerTool("list_project_fields", {
+    description: "List field metadata and selectable option IDs for a GitHub Projects v2 project. Item field values are not returned.",
+    inputSchema: {
+      hostname: z.string().min(1).default("github.com"),
+      owner: ownerLoginSchema,
+      projectId: projectIdSchema,
+      limit: z.number().int().min(1).max(100).default(50),
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+  }, async ({ hostname, owner, projectId, limit }) => {
+    assertHostAllowed(hostname, config);
+    assertOwnerAllowed(owner, config);
+    const normalizedHostname = hostname.trim().toLowerCase();
+    const query = `query($projectId: ID!, $limit: Int!) {
+      node(id: $projectId) { __typename ... on ProjectV2 {
+        id owner { ... on User { login } ... on Organization { login } } fields(first: $limit) { totalCount nodes {
+          __typename ... on ProjectV2Field { id name dataType }
+          ... on ProjectV2SingleSelectField { id name dataType options { id name } }
+          ... on ProjectV2IterationField { id name dataType configuration { iterations { id title startDate duration } } }
+        } }
+      } }
+    }`;
+    const value = await jsonGh(
+      ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+      config,
+      { stdin: JSON.stringify({ query, variables: { projectId: projectId.trim(), limit } }) },
+    );
+    assertProjectOwner(value, owner);
+    return response(projectFieldsSummary(value));
+  });
+
+  server.registerTool("add_project_item", {
+    description: "Add an existing Issue or Pull Request to a GitHub Projects v2 project. Draft items cannot be created.",
+    inputSchema: {
+      ...writeContextSchema,
+      owner: ownerLoginSchema,
+      projectId: projectIdSchema,
+      contentType: z.enum(["issue", "pull_request"]),
+      number: z.number().int().positive(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  }, async ({ repository, hostname, owner, projectId, contentType, number }) => {
+    assertHostAllowed(hostname, config);
+    assertRepositoryAllowed(repository, config);
+    assertOwnerAllowed(owner, config);
+    const normalizedRepository = repository.trim();
+    const normalizedHostname = hostname.trim().toLowerCase();
+    await assertProjectAccess(projectId.trim(), owner, normalizedHostname, config);
+    const path = contentType === "issue" ? `repos/${normalizedRepository}/issues/${number}` : `repos/${normalizedRepository}/pulls/${number}`;
+    const content = await jsonGh(["api", path, "--hostname", normalizedHostname], config);
+    if (!content || typeof content !== "object" || Array.isArray(content)) throw new Error("GitHub API returned an unexpected content response.");
+    const contentRecord = content as Record<string, unknown>;
+    if (contentType === "issue" && contentRecord.pull_request !== undefined) throw new Error(`Issue #${number} is a pull request.`);
+    if (typeof contentRecord.node_id !== "string") throw new Error("GitHub API returned content without a node ID.");
+    const query = `mutation($projectId: ID!, $contentId: ID!) {
+      addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) { item { id isArchived } }
+    }`;
+    const operation = await auditedJsonGh(
+      { tool: "add_project_item", hostname: normalizedHostname, repository: normalizedRepository, owner: owner.trim().toLowerCase(), projectId: projectId.trim(), ...(contentType === "issue" ? { issueNumber: number } : { pullRequestNumber: number }) },
+      ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+      { query, variables: { projectId: projectId.trim(), contentId: contentRecord.node_id } },
+      config,
+      (value) => ({ projectItemId: String(graphqlProjectItem(value, "addProjectV2ItemById").id) }),
+    );
+    return response({ item: projectItemSummary(graphqlProjectItem(operation.value, "addProjectV2ItemById")), audit: operation.audit });
+  });
+
+  server.registerTool("set_project_item_field", {
+    description: "Set one supported text, number, date, single-select, or iteration value on a GitHub Projects v2 item.",
+    inputSchema: {
+      hostname: z.string().min(1).default("github.com"), owner: ownerLoginSchema,
+      projectId: projectIdSchema, itemId: projectItemIdSchema, fieldId: projectFieldIdSchema,
+      valueType: z.enum(["text", "number", "date", "singleSelect", "iteration"]),
+      value: z.union([z.string().max(65_536), z.number().finite()]),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  }, async ({ hostname, owner, projectId, itemId, fieldId, valueType, value }) => {
+    assertHostAllowed(hostname, config); assertOwnerAllowed(owner, config);
+    const normalizedHostname = hostname.trim().toLowerCase();
+    await assertProjectAccess(projectId.trim(), owner, normalizedHostname, config);
+    const query = `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: ProjectV2FieldValue!) {
+      updateProjectV2ItemFieldValue(input: { projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: $value }) { projectV2Item { id isArchived } }
+    }`;
+    const operation = await auditedJsonGh(
+      { tool: "set_project_item_field", hostname: normalizedHostname, owner: owner.trim().toLowerCase(), projectId: projectId.trim(), projectItemId: itemId.trim(), projectFieldId: fieldId.trim() },
+      ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+      { query, variables: { projectId: projectId.trim(), itemId: itemId.trim(), fieldId: fieldId.trim(), value: projectFieldValue(valueType, value) } }, config,
+    );
+    return response({ item: projectItemSummary(graphqlProjectItem(operation.value, "updateProjectV2ItemFieldValue")), audit: operation.audit });
+  });
+
+  server.registerTool("clear_project_item_field", {
+    description: "Clear one supported field value on a GitHub Projects v2 item.",
+    inputSchema: { hostname: z.string().min(1).default("github.com"), owner: ownerLoginSchema, projectId: projectIdSchema, itemId: projectItemIdSchema, fieldId: projectFieldIdSchema },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  }, async ({ hostname, owner, projectId, itemId, fieldId }) => {
+    assertHostAllowed(hostname, config); assertOwnerAllowed(owner, config);
+    const normalizedHostname = hostname.trim().toLowerCase();
+    await assertProjectAccess(projectId.trim(), owner, normalizedHostname, config);
+    const query = `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) {
+      clearProjectV2ItemFieldValue(input: { projectId: $projectId, itemId: $itemId, fieldId: $fieldId }) { projectV2Item { id isArchived } }
+    }`;
+    const target = { hostname: normalizedHostname, owner: owner.trim().toLowerCase(), projectId: projectId.trim(), projectItemId: itemId.trim(), projectFieldId: fieldId.trim() };
+    const operation = await auditedJsonGh({ tool: "clear_project_item_field", ...target }, ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"], { query, variables: { projectId: projectId.trim(), itemId: itemId.trim(), fieldId: fieldId.trim() } }, config);
+    return response({ item: projectItemSummary(graphqlProjectItem(operation.value, "clearProjectV2ItemFieldValue")), audit: operation.audit });
+  });
+
+  server.registerTool("set_project_item_archived", {
+    description: "Archive or restore a GitHub Projects v2 item. This is reversible and does not delete its Issue or Pull Request.",
+    inputSchema: { hostname: z.string().min(1).default("github.com"), owner: ownerLoginSchema, projectId: projectIdSchema, itemId: projectItemIdSchema, archived: z.boolean() },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  }, async ({ hostname, owner, projectId, itemId, archived }) => {
+    assertHostAllowed(hostname, config); assertOwnerAllowed(owner, config);
+    const normalizedHostname = hostname.trim().toLowerCase();
+    await assertProjectAccess(projectId.trim(), owner, normalizedHostname, config);
+    const operationName = archived ? "archiveProjectV2Item" : "unarchiveProjectV2Item";
+    const query = `mutation($projectId: ID!, $itemId: ID!) { ${operationName}(input: { projectId: $projectId, itemId: $itemId }) { item { id isArchived } } }`;
+    const operation = await auditedJsonGh(
+      { tool: "set_project_item_archived", hostname: normalizedHostname, owner: owner.trim().toLowerCase(), projectId: projectId.trim(), projectItemId: itemId.trim() },
+      ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+      { query, variables: { projectId: projectId.trim(), itemId: itemId.trim() } }, config,
+    );
+    return response({ item: projectItemSummary(graphqlProjectItem(operation.value, operationName)), audit: operation.audit });
   });
 
   server.registerTool("update_release", {

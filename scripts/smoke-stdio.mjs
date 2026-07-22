@@ -26,6 +26,12 @@ const expectedTools = [
   "update_milestone",
   "create_project",
   "update_project",
+  "list_project_items",
+  "list_project_fields",
+  "add_project_item",
+  "set_project_item_field",
+  "clear_project_item_field",
+  "set_project_item_archived",
   "run_gh",
 ];
 
@@ -34,6 +40,8 @@ const forbiddenTools = [
   "delete_repository",
   "delete_release",
   "delete_project",
+  "delete_project_item",
+  "create_project_field",
   "show_token",
 ];
 
