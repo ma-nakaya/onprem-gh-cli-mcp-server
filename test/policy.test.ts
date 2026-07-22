@@ -26,6 +26,8 @@ describe("read-only policy", () => {
     expect(() => assertSafeGhArguments(["workflow", "run", "ci.yml"])).toThrow(/not allowed/);
     expect(() => assertSafeGhArguments(["run", "rerun", "123"])).toThrow(/not allowed/);
     expect(() => assertSafeGhArguments(["run", "cancel", "123"])).toThrow(/not allowed/);
+    expect(() => assertSafeGhArguments(["label", "create", "priority-high"])).toThrow(/not allowed/);
+    expect(() => assertSafeGhArguments(["api", "repos/example/repo/milestones", "--method", "POST"])).toThrow(/blocked/i);
   });
   it("blocks token disclosure", () => {
     expect(() => assertSafeGhArguments(["auth", "token"])).toThrow();
