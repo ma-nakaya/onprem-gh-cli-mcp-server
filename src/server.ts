@@ -5,6 +5,7 @@ import type { Config } from "./config.js";
 import { runGh } from "./gh-runner.js";
 import type { RunGhOptions } from "./gh-runner.js";
 import { assertHostAllowed, assertRepositoryAllowed, assertSafeGhArguments } from "./policy.js";
+import { assertReviewBody, pullRequestReviewSummary, pullRequestSummary } from "./pull-request.js";
 
 function response(value: unknown) {
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
@@ -24,11 +25,16 @@ async function assertStandaloneIssue(repository: string, issueNumber: number, ho
   if (item.pull_request !== undefined) throw new Error(`Issue #${issueNumber} is a pull request. Use a Pull Request-specific tool instead.`);
 }
 
+async function assertPullRequest(repository: string, pullRequestNumber: number, hostname: string, config: Config): Promise<void> {
+  await jsonGh(["api", `repos/${repository}/pulls/${pullRequestNumber}`, "--hostname", hostname], config);
+}
+
 interface AuditTarget {
   tool: string;
   hostname: string;
   repository: string;
   issueNumber?: number;
+  pullRequestNumber?: number;
 }
 
 async function auditedJsonGh(
@@ -136,6 +142,10 @@ export function createServer(config: Config): McpServer {
     ...repositorySchema,
     hostname: z.string().min(1).default("github.com"),
   };
+  const gitRefSchema = z.string().trim().min(1).max(255).refine(
+    (value) => !/[\0\r\n]/.test(value),
+    "Git reference must not contain control characters.",
+  );
 
   server.registerTool("list_issues", {
     description: "List issues in an allowed repository.",
@@ -229,6 +239,120 @@ export function createServer(config: Config): McpServer {
   }, async ({ repository, state, limit }) => {
     assertRepositoryAllowed(repository, config);
     return response(await jsonGh(["pr", "list", "--repo", repository, "--state", state, "--limit", String(limit), "--json", "number,title,state,isDraft,author,headRefName,baseRefName,createdAt,updatedAt,url"], config));
+  });
+
+  server.registerTool("create_pull_request", {
+    description: "Create a pull request in an allowed repository. This never merges it. The title and body are sent through stdin and are not written to the audit log.",
+    inputSchema: {
+      ...writeContextSchema,
+      title: z.string().min(1).max(256),
+      body: z.string().max(65_536).optional(),
+      head: gitRefSchema.describe("Head branch, or owner:branch for a fork"),
+      base: gitRefSchema.describe("Base branch"),
+      draft: z.boolean().default(true),
+      maintainerCanModify: z.boolean().default(true),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  }, async ({ repository, hostname, title, body, head, base, draft, maintainerCanModify }) => {
+    assertHostAllowed(hostname, config);
+    assertRepositoryAllowed(repository, config);
+    const normalizedRepository = repository.trim();
+    const normalizedHostname = hostname.trim().toLowerCase();
+    const payload: Record<string, unknown> = {
+      title,
+      head: head.trim(),
+      base: base.trim(),
+      draft,
+      maintainer_can_modify: maintainerCanModify,
+    };
+    if (body !== undefined) payload.body = body;
+    const operation = await auditedJsonGh(
+      { tool: "create_pull_request", hostname: normalizedHostname, repository: normalizedRepository },
+      ["api", `repos/${normalizedRepository}/pulls`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+      payload,
+      config,
+    );
+    return response({ pullRequest: pullRequestSummary(operation.value), audit: operation.audit });
+  });
+
+  server.registerTool("update_pull_request", {
+    description: "Update a pull request title, body, or reversible open/closed state. This cannot merge a pull request.",
+    inputSchema: {
+      ...writeContextSchema,
+      pullRequestNumber: z.number().int().positive(),
+      title: z.string().min(1).max(256).optional(),
+      body: z.string().max(65_536).optional(),
+      state: z.enum(["open", "closed"]).optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  }, async ({ repository, hostname, pullRequestNumber, title, body, state }) => {
+    assertHostAllowed(hostname, config);
+    assertRepositoryAllowed(repository, config);
+    const normalizedRepository = repository.trim();
+    const normalizedHostname = hostname.trim().toLowerCase();
+    const payload: Record<string, unknown> = {};
+    if (title !== undefined) payload.title = title;
+    if (body !== undefined) payload.body = body;
+    if (state !== undefined) payload.state = state;
+    if (Object.keys(payload).length === 0) throw new Error("At least one of title, body, or state must be provided.");
+    await assertPullRequest(normalizedRepository, pullRequestNumber, normalizedHostname, config);
+    const operation = await auditedJsonGh(
+      { tool: "update_pull_request", hostname: normalizedHostname, repository: normalizedRepository, pullRequestNumber },
+      ["api", `repos/${normalizedRepository}/pulls/${pullRequestNumber}`, "--hostname", normalizedHostname, "--method", "PATCH", "--input", "-"],
+      payload,
+      config,
+    );
+    return response({ pullRequest: pullRequestSummary(operation.value), audit: operation.audit });
+  });
+
+  server.registerTool("comment_pull_request", {
+    description: "Add a top-level conversation comment to a pull request. The comment body is sent through stdin and is not written to the audit log.",
+    inputSchema: {
+      ...writeContextSchema,
+      pullRequestNumber: z.number().int().positive(),
+      body: z.string().min(1).max(65_536),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  }, async ({ repository, hostname, pullRequestNumber, body }) => {
+    assertHostAllowed(hostname, config);
+    assertRepositoryAllowed(repository, config);
+    const normalizedRepository = repository.trim();
+    const normalizedHostname = hostname.trim().toLowerCase();
+    await assertPullRequest(normalizedRepository, pullRequestNumber, normalizedHostname, config);
+    const operation = await auditedJsonGh(
+      { tool: "comment_pull_request", hostname: normalizedHostname, repository: normalizedRepository, pullRequestNumber },
+      ["api", `repos/${normalizedRepository}/issues/${pullRequestNumber}/comments`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+      { body },
+      config,
+    );
+    return response({ comment: commentSummary(operation.value), audit: operation.audit });
+  });
+
+  server.registerTool("review_pull_request", {
+    description: "Submit an APPROVE, REQUEST_CHANGES, or COMMENT review to an existing pull request. This never merges it. COMMENT and REQUEST_CHANGES require a body.",
+    inputSchema: {
+      ...writeContextSchema,
+      pullRequestNumber: z.number().int().positive(),
+      event: z.enum(["APPROVE", "REQUEST_CHANGES", "COMMENT"]),
+      body: z.string().max(65_536).optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  }, async ({ repository, hostname, pullRequestNumber, event, body }) => {
+    assertHostAllowed(hostname, config);
+    assertRepositoryAllowed(repository, config);
+    assertReviewBody(event, body);
+    const normalizedRepository = repository.trim();
+    const normalizedHostname = hostname.trim().toLowerCase();
+    await assertPullRequest(normalizedRepository, pullRequestNumber, normalizedHostname, config);
+    const payload: Record<string, unknown> = { event };
+    if (body !== undefined) payload.body = body;
+    const operation = await auditedJsonGh(
+      { tool: "review_pull_request", hostname: normalizedHostname, repository: normalizedRepository, pullRequestNumber },
+      ["api", `repos/${normalizedRepository}/pulls/${pullRequestNumber}/reviews`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+      payload,
+      config,
+    );
+    return response({ review: pullRequestReviewSummary(operation.value), audit: operation.audit });
   });
 
   server.registerTool("list_workflow_runs", {

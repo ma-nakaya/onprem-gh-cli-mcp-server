@@ -40,4 +40,32 @@ describe("audit log", () => {
     expect(text).not.toContain("body");
     expect(text).not.toContain("comment text");
   });
+
+  it("records a pull request target without review content", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "onprem-gh-cli-mcp-"));
+    temporaryDirectories.push(directory);
+    const auditLogPath = join(directory, "audit.jsonl");
+
+    await appendAuditRecord(auditLogPath, {
+      timestamp: "2026-07-22T01:00:00.000Z",
+      tool: "review_pull_request",
+      hostname: "github.com",
+      repository: "ma-nakaya/example",
+      pullRequestNumber: 42,
+      outcome: "succeeded",
+      durationMs: 84,
+    });
+
+    const text = await readFile(auditLogPath, "utf8");
+    expect(JSON.parse(text.trim())).toEqual({
+      timestamp: "2026-07-22T01:00:00.000Z",
+      tool: "review_pull_request",
+      hostname: "github.com",
+      repository: "ma-nakaya/example",
+      pullRequestNumber: 42,
+      outcome: "succeeded",
+      durationMs: 84,
+    });
+    expect(text).not.toContain("review content");
+  });
 });

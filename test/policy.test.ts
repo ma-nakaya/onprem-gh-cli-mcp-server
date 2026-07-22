@@ -15,6 +15,10 @@ describe("read-only policy", () => {
     expect(() => assertSafeGhArguments(["pr", "merge", "1"])).toThrow(/not allowed/);
     expect(() => assertSafeGhArguments(["issue", "create", "--title", "example"])).toThrow(/not allowed/);
     expect(() => assertSafeGhArguments(["issue", "comment", "1", "--body", "example"])).toThrow(/not allowed/);
+    expect(() => assertSafeGhArguments(["pr", "create", "--title", "example"])).toThrow(/not allowed/);
+    expect(() => assertSafeGhArguments(["pr", "edit", "1"])).toThrow(/not allowed/);
+    expect(() => assertSafeGhArguments(["pr", "review", "1", "--approve"])).toThrow(/not allowed/);
+    expect(() => assertSafeGhArguments(["pr", "comment", "1", "--body", "example"])).toThrow(/not allowed/);
   });
   it("blocks token disclosure", () => {
     expect(() => assertSafeGhArguments(["auth", "token"])).toThrow();
