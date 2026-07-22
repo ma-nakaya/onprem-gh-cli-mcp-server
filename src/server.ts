@@ -8,6 +8,7 @@ import { assertHostAllowed, assertRepositoryAllowed, assertSafeGhArguments } fro
 import { assertReviewBody, pullRequestReviewSummary, pullRequestSummary } from "./pull-request.js";
 import { assertDraftRelease, releaseIdentifier, releaseSummary } from "./release.js";
 import { assertActiveWorkflow, isWorkflowIdentifier, normalizeWorkflowInputs, workflowSummary } from "./workflow.js";
+import { isLabelColor, isUtcTimestamp, labelSummary, milestoneIdentifier, milestoneSummary } from "./repository-metadata.js";
 
 function response(value: unknown) {
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
@@ -39,6 +40,8 @@ interface AuditTarget {
   pullRequestNumber?: number;
   releaseId?: number;
   workflow?: string;
+  label?: string;
+  milestoneNumber?: number;
 }
 
 async function auditedJsonGh(
@@ -156,6 +159,9 @@ export function createServer(config: Config): McpServer {
     isWorkflowIdentifier,
     "Workflow must be a positive numeric ID or a .yml/.yaml file name.",
   );
+  const labelNameSchema = z.string().trim().min(1).max(50);
+  const labelColorSchema = z.string().refine(isLabelColor, "Label color must be exactly six hexadecimal characters.");
+  const dueOnSchema = z.string().refine(isUtcTimestamp, "Milestone dueOn must be a valid UTC ISO 8601 timestamp.");
 
   server.registerTool("list_issues", {
     description: "List issues in an allowed repository.",
@@ -437,6 +443,124 @@ export function createServer(config: Config): McpServer {
       (value) => ({ releaseId: releaseIdentifier(value) }),
     );
     return response({ release: releaseSummary(operation.value), audit: operation.audit });
+  });
+
+  server.registerTool("create_label", {
+    description: "Create a label in an allowed repository. The description is sent through stdin and is not written to the audit log.",
+    inputSchema: {
+      ...writeContextSchema,
+      name: labelNameSchema,
+      color: labelColorSchema,
+      description: z.string().max(100).optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  }, async ({ repository, hostname, name, color, description }) => {
+    assertHostAllowed(hostname, config);
+    assertRepositoryAllowed(repository, config);
+    const normalizedRepository = repository.trim();
+    const normalizedHostname = hostname.trim().toLowerCase();
+    const normalizedName = name.trim();
+    const payload: Record<string, unknown> = { name: normalizedName, color: color.toLowerCase() };
+    if (description !== undefined) payload.description = description;
+    const operation = await auditedJsonGh(
+      { tool: "create_label", hostname: normalizedHostname, repository: normalizedRepository, label: normalizedName },
+      ["api", `repos/${normalizedRepository}/labels`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+      payload,
+      config,
+    );
+    return response({ label: labelSummary(operation.value), audit: operation.audit });
+  });
+
+  server.registerTool("update_label", {
+    description: "Update an existing label name, color, or description. This tool cannot delete labels.",
+    inputSchema: {
+      ...writeContextSchema,
+      currentName: labelNameSchema,
+      newName: labelNameSchema.optional(),
+      color: labelColorSchema.optional(),
+      description: z.string().max(100).optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  }, async ({ repository, hostname, currentName, newName, color, description }) => {
+    assertHostAllowed(hostname, config);
+    assertRepositoryAllowed(repository, config);
+    const normalizedRepository = repository.trim();
+    const normalizedHostname = hostname.trim().toLowerCase();
+    const normalizedCurrentName = currentName.trim();
+    const payload: Record<string, unknown> = {};
+    if (newName !== undefined) payload.new_name = newName.trim();
+    if (color !== undefined) payload.color = color.toLowerCase();
+    if (description !== undefined) payload.description = description;
+    if (Object.keys(payload).length === 0) throw new Error("At least one label field must be provided.");
+    const labelPath = `repos/${normalizedRepository}/labels/${encodeURIComponent(normalizedCurrentName)}`;
+    await jsonGh(["api", labelPath, "--hostname", normalizedHostname], config);
+    const operation = await auditedJsonGh(
+      { tool: "update_label", hostname: normalizedHostname, repository: normalizedRepository, label: normalizedCurrentName },
+      ["api", labelPath, "--hostname", normalizedHostname, "--method", "PATCH", "--input", "-"],
+      payload,
+      config,
+    );
+    return response({ label: labelSummary(operation.value), audit: operation.audit });
+  });
+
+  server.registerTool("create_milestone", {
+    description: "Create an open milestone in an allowed repository. The description is sent through stdin and is not written to the audit log.",
+    inputSchema: {
+      ...writeContextSchema,
+      title: z.string().trim().min(1).max(256),
+      description: z.string().max(65_536).optional(),
+      dueOn: dueOnSchema.optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  }, async ({ repository, hostname, title, description, dueOn }) => {
+    assertHostAllowed(hostname, config);
+    assertRepositoryAllowed(repository, config);
+    const normalizedRepository = repository.trim();
+    const normalizedHostname = hostname.trim().toLowerCase();
+    const payload: Record<string, unknown> = { title: title.trim(), state: "open" };
+    if (description !== undefined) payload.description = description;
+    if (dueOn !== undefined) payload.due_on = dueOn;
+    const operation = await auditedJsonGh(
+      { tool: "create_milestone", hostname: normalizedHostname, repository: normalizedRepository },
+      ["api", `repos/${normalizedRepository}/milestones`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+      payload,
+      config,
+      (value) => ({ milestoneNumber: milestoneIdentifier(value) }),
+    );
+    return response({ milestone: milestoneSummary(operation.value), audit: operation.audit });
+  });
+
+  server.registerTool("update_milestone", {
+    description: "Update an existing milestone title, description, reversible open/closed state, or UTC due date. This tool cannot delete milestones.",
+    inputSchema: {
+      ...writeContextSchema,
+      milestoneNumber: z.number().int().positive(),
+      title: z.string().trim().min(1).max(256).optional(),
+      description: z.string().max(65_536).optional(),
+      state: z.enum(["open", "closed"]).optional(),
+      dueOn: dueOnSchema.nullable().optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  }, async ({ repository, hostname, milestoneNumber, title, description, state, dueOn }) => {
+    assertHostAllowed(hostname, config);
+    assertRepositoryAllowed(repository, config);
+    const normalizedRepository = repository.trim();
+    const normalizedHostname = hostname.trim().toLowerCase();
+    const payload: Record<string, unknown> = {};
+    if (title !== undefined) payload.title = title.trim();
+    if (description !== undefined) payload.description = description;
+    if (state !== undefined) payload.state = state;
+    if (dueOn !== undefined) payload.due_on = dueOn;
+    if (Object.keys(payload).length === 0) throw new Error("At least one milestone field must be provided.");
+    const milestonePath = `repos/${normalizedRepository}/milestones/${milestoneNumber}`;
+    await jsonGh(["api", milestonePath, "--hostname", normalizedHostname], config);
+    const operation = await auditedJsonGh(
+      { tool: "update_milestone", hostname: normalizedHostname, repository: normalizedRepository, milestoneNumber },
+      ["api", milestonePath, "--hostname", normalizedHostname, "--method", "PATCH", "--input", "-"],
+      payload,
+      config,
+    );
+    return response({ milestone: milestoneSummary(operation.value), audit: operation.audit });
   });
 
   server.registerTool("update_release", {
