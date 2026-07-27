@@ -1,10 +1,19 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { loginFromUserApi, verifyAccountProfile } from "./account-profile.js";
 import { appendAuditRecord } from "./audit-log.js";
 import type { Config } from "./config.js";
 import { runGh } from "./gh-runner.js";
 import type { RunGhOptions } from "./gh-runner.js";
-import { assertHostAllowed, assertOwnerAllowed, assertRepositoryAllowed, assertSafeGhArguments } from "./policy.js";
+import {
+  assertHostAllowed,
+  assertOwnerAllowed,
+  assertRepositoryAllowed,
+  assertRepositoryListOwnerAllowed,
+  assertRunGhAllowedByResourceScope,
+  assertSafeGhArguments,
+  hasResourceAllowlist,
+} from "./policy.js";
 import { assertReviewBody, pullRequestReviewSummary, pullRequestSummary } from "./pull-request.js";
 import { assertDraftRelease, releaseIdentifier, releaseSummary } from "./release.js";
 import { assertActiveWorkflow, isWorkflowIdentifier, normalizeWorkflowInputs, workflowSummary } from "./workflow.js";
@@ -45,6 +54,7 @@ async function assertProjectAccess(projectId: string, owner: string, hostname: s
 interface AuditTarget {
   tool: string;
   hostname: string;
+  account?: string;
   repository?: string;
   owner?: string;
   projectId?: string;
@@ -61,22 +71,50 @@ interface AuditTarget {
   milestoneNumber?: number;
 }
 
-async function auditedJsonGh(
+function accountScopedTarget(target: AuditTarget, config: Config): AuditTarget {
+  return config.accountProfile === undefined
+    ? target
+    : { ...target, account: config.accountProfile.expectedLogin };
+}
+
+async function verifyWriteAccount(target: AuditTarget, config: Config): Promise<AuditTarget> {
+  const scopedTarget = accountScopedTarget(target, config);
+  const startedAt = Date.now();
+  try {
+    await verifyAccountProfile(config);
+    return scopedTarget;
+  } catch (error) {
+    try {
+      await appendAuditRecord(config.auditLogPath, {
+        ...scopedTarget,
+        outcome: "failed",
+        durationMs: Date.now() - startedAt,
+      });
+    } catch {
+      // Preserve the account verification error even if the audit destination is unavailable.
+    }
+    throw error;
+  }
+}
+
+async function auditedOperation<T>(
   target: AuditTarget,
-  args: string[],
-  payload: Record<string, unknown>,
   config: Config,
-  completedTarget?: (value: unknown) => Partial<AuditTarget>,
-): Promise<{ value: unknown; audit: { started: true; completed: boolean } }> {
+  operation: () => Promise<T>,
+  completedTarget?: (value: T) => Partial<AuditTarget>,
+): Promise<{ value: T; audit: { started: true; completed: boolean } }> {
+  const scopedTarget = await verifyWriteAccount(target, config);
   const startedAt = Date.now();
   await appendAuditRecord(config.auditLogPath, {
-    ...target,
+    ...scopedTarget,
     outcome: "started",
     durationMs: 0,
   });
   try {
-    const value = await jsonGh(args, config, { stdin: JSON.stringify(payload) });
-    const finalTarget = completedTarget === undefined ? target : { ...target, ...completedTarget(value) };
+    const value = await operation();
+    const finalTarget = completedTarget === undefined
+      ? scopedTarget
+      : { ...scopedTarget, ...completedTarget(value) };
     let completed = true;
     try {
       await appendAuditRecord(config.auditLogPath, {
@@ -91,7 +129,7 @@ async function auditedJsonGh(
   } catch (error) {
     try {
       await appendAuditRecord(config.auditLogPath, {
-        ...target,
+        ...scopedTarget,
         outcome: "failed",
         durationMs: Date.now() - startedAt,
       });
@@ -100,6 +138,21 @@ async function auditedJsonGh(
     }
     throw error;
   }
+}
+
+async function auditedJsonGh(
+  target: AuditTarget,
+  args: string[],
+  payload: Record<string, unknown>,
+  config: Config,
+  completedTarget?: (value: unknown) => Partial<AuditTarget>,
+): Promise<{ value: unknown; audit: { started: true; completed: boolean } }> {
+  return auditedOperation(
+    target,
+    config,
+    () => jsonGh(args, config, { stdin: JSON.stringify(payload) }),
+    completedTarget,
+  );
 }
 
 function issueSummary(value: unknown): Record<string, unknown> {
@@ -135,8 +188,33 @@ export function createServer(config: Config): McpServer {
     annotations: { readOnlyHint: true, destructiveHint: false },
   }, async ({ hostname }) => {
     assertHostAllowed(hostname, config);
-    const result = await runGh(["auth", "status", "--hostname", hostname], config, { allowFailure: true });
-    return response({ authenticated: result.exitCode === 0, hostname, details: result.stderr || result.stdout });
+    const normalizedHostname = hostname.trim().toLowerCase();
+    const profile = config.accountProfile?.hostname === normalizedHostname ? config.accountProfile : undefined;
+    const result = await runGh([
+      "auth",
+      "status",
+      "--hostname",
+      normalizedHostname,
+    ], config, { allowFailure: true });
+    const identity = await runGh([
+      "api",
+      "user",
+      "--hostname",
+      normalizedHostname,
+      "--jq",
+      ".login",
+    ], config, { allowFailure: true });
+    const activeLogin = identity.exitCode === 0 ? loginFromUserApi(identity.stdout) : undefined;
+    return response({
+      authenticated: result.exitCode === 0 && activeLogin !== undefined,
+      hostname: normalizedHostname,
+      ...(activeLogin === undefined ? {} : { activeLogin }),
+      ...(profile === undefined ? {} : {
+        expectedLogin: profile.expectedLogin,
+        matchesExpected: activeLogin === profile.expectedLogin,
+      }),
+      details: result.stderr || result.stdout,
+    });
   });
 
   server.registerTool("list_repositories", {
@@ -144,7 +222,19 @@ export function createServer(config: Config): McpServer {
     inputSchema: { owner: z.string().optional(), limit: z.number().int().min(1).max(100).default(30) },
     annotations: { readOnlyHint: true, destructiveHint: false },
   }, async ({ owner, limit }) => {
-    if (owner && config.allowedOwners.size > 0 && !config.allowedOwners.has(owner.toLowerCase())) throw new Error(`Repository owner is not allowed: ${owner}`);
+    if (!owner && hasResourceAllowlist(config)) {
+      throw new Error("owner is required when a resource allowlist is configured.");
+    }
+    if (owner) assertRepositoryListOwnerAllowed(owner, config);
+    if (config.allowedRepositories.size > 0) {
+      const normalizedOwner = owner?.trim().toLowerCase();
+      const repositories = [...config.allowedRepositories]
+        .filter((repository) => normalizedOwner === undefined || repository.split("/", 1)[0] === normalizedOwner)
+        .slice(0, limit);
+      return response(await Promise.all(repositories.map(async (repository) =>
+        jsonGh(["repo", "view", repository, "--json", "nameWithOwner,url,visibility,isPrivate,updatedAt"], config)
+      )));
+    }
     const args = ["repo", "list", ...(owner ? [owner] : []), "--limit", String(limit), "--json", "nameWithOwner,url,visibility,isPrivate,updatedAt"];
     return response(await jsonGh(args, config));
   });
@@ -156,7 +246,18 @@ export function createServer(config: Config): McpServer {
   }, async () => {
     const pages = await jsonGh(["api", "user/orgs", "--paginate", "--slurp"], config);
     if (!Array.isArray(pages)) throw new Error("GitHub CLI returned an unexpected organizations response.");
-    const organizations = pages.flatMap((page) => Array.isArray(page) ? page : []).map((organization) => {
+    const allowedOrganizationOwners = new Set(config.allowedOwners);
+    if (allowedOrganizationOwners.size === 0) {
+      for (const repository of config.allowedRepositories) {
+        allowedOrganizationOwners.add(repository.split("/", 1)[0]);
+      }
+    }
+    const organizations = pages.flatMap((page) => Array.isArray(page) ? page : []).filter((organization) => {
+      if (!hasResourceAllowlist(config)) return true;
+      if (!organization || typeof organization !== "object" || Array.isArray(organization)) return false;
+      const login = (organization as Record<string, unknown>).login;
+      return typeof login === "string" && allowedOrganizationOwners.has(login.toLowerCase());
+    }).map((organization) => {
       const item = organization as Record<string, unknown>;
       return { login: item.login, id: item.id, url: item.html_url, description: item.description };
     });
@@ -239,38 +340,67 @@ export function createServer(config: Config): McpServer {
     const paths = files.map((file) => file.path);
     if (new Set(paths).size !== paths.length) throw new Error("Each repository path may appear only once per commit.");
     const normalizedRepository = repository.trim(); const normalizedHostname = hostname.trim().toLowerCase();
-    const refPath = `repos/${normalizedRepository}/git/ref/heads/${encodeGitRef(branch.trim())}`;
-    const currentRef = await jsonGh(["api", refPath, "--hostname", normalizedHostname], config);
-    const actualHeadSha = branchHeadSha(currentRef);
-    if (actualHeadSha !== expectedHeadSha) throw new Error("Branch head changed. Fetch the branch again and rebuild the commit from the new head.");
-    const baseCommit = await jsonGh(["api", `repos/${normalizedRepository}/git/commits/${actualHeadSha}`, "--hostname", normalizedHostname], config);
-    const baseTree = commitTreeSha(baseCommit);
-    const tree: Record<string, unknown>[] = [];
-    for (const file of files) {
-      assertRepositoryPath(file.path);
-      if (file.operation === "delete") { tree.push({ path: file.path, mode: "100644", type: "blob", sha: null }); continue; }
-      const blob = await jsonGh(
-        ["api", `repos/${normalizedRepository}/git/blobs`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"], config,
-        { stdin: JSON.stringify({ content: file.content, encoding: "utf-8" }) },
-      );
-      tree.push({ path: file.path, mode: "100644", type: "blob", sha: gitObjectSha(blob, "Git blob") });
-    }
-    const newTree = await jsonGh(
-      ["api", `repos/${normalizedRepository}/git/trees`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"], config,
-      { stdin: JSON.stringify({ base_tree: baseTree, tree }) },
+    const operation = await auditedOperation(
+      {
+        tool: "commit_files",
+        hostname: normalizedHostname,
+        repository: normalizedRepository,
+        branch: branch.trim(),
+        fileCount: files.length,
+      },
+      config,
+      async () => {
+        const refPath = `repos/${normalizedRepository}/git/ref/heads/${encodeGitRef(branch.trim())}`;
+        const currentRef = await jsonGh(["api", refPath, "--hostname", normalizedHostname], config);
+        const actualHeadSha = branchHeadSha(currentRef);
+        if (actualHeadSha !== expectedHeadSha) {
+          throw new Error("Branch head changed. Fetch the branch again and rebuild the commit from the new head.");
+        }
+        const baseCommit = await jsonGh(
+          ["api", `repos/${normalizedRepository}/git/commits/${actualHeadSha}`, "--hostname", normalizedHostname],
+          config,
+        );
+        const baseTree = commitTreeSha(baseCommit);
+        const tree: Record<string, unknown>[] = [];
+        for (const file of files) {
+          assertRepositoryPath(file.path);
+          if (file.operation === "delete") {
+            tree.push({ path: file.path, mode: "100644", type: "blob", sha: null });
+            continue;
+          }
+          const blob = await jsonGh(
+            ["api", `repos/${normalizedRepository}/git/blobs`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+            config,
+            { stdin: JSON.stringify({ content: file.content, encoding: "utf-8" }) },
+          );
+          tree.push({ path: file.path, mode: "100644", type: "blob", sha: gitObjectSha(blob, "Git blob") });
+        }
+        const newTree = await jsonGh(
+          ["api", `repos/${normalizedRepository}/git/trees`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+          config,
+          { stdin: JSON.stringify({ base_tree: baseTree, tree }) },
+        );
+        const newTreeSha = gitObjectSha(newTree, "Git tree");
+        const commit = await jsonGh(
+          ["api", `repos/${normalizedRepository}/git/commits`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+          config,
+          { stdin: JSON.stringify({ message: message.trim(), tree: newTreeSha, parents: [actualHeadSha] }) },
+        );
+        const commitSha = gitObjectSha(commit, "Git commit");
+        const branchValue = await jsonGh(
+          ["api", `repos/${normalizedRepository}/git/refs/heads/${encodeGitRef(branch.trim())}`, "--hostname", normalizedHostname, "--method", "PATCH", "--input", "-"],
+          config,
+          { stdin: JSON.stringify({ sha: commitSha, force: false }) },
+        );
+        return { branchValue, commitSha };
+      },
+      (value) => ({ commitSha: value.commitSha }),
     );
-    const newTreeSha = gitObjectSha(newTree, "Git tree");
-    const commit = await jsonGh(
-      ["api", `repos/${normalizedRepository}/git/commits`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"], config,
-      { stdin: JSON.stringify({ message: message.trim(), tree: newTreeSha, parents: [actualHeadSha] }) },
-    );
-    const commitSha = gitObjectSha(commit, "Git commit");
-    const operation = await auditedJsonGh(
-      { tool: "commit_files", hostname: normalizedHostname, repository: normalizedRepository, branch: branch.trim(), commitSha, fileCount: files.length },
-      ["api", `repos/${normalizedRepository}/git/refs/heads/${encodeGitRef(branch.trim())}`, "--hostname", normalizedHostname, "--method", "PATCH", "--input", "-"],
-      { sha: commitSha, force: false }, config,
-    );
-    return response({ branch: branchSummary(operation.value), commit: { sha: commitSha, fileCount: files.length }, audit: operation.audit });
+    return response({
+      branch: branchSummary(operation.value.branchValue),
+      commit: { sha: operation.value.commitSha, fileCount: files.length },
+      audit: operation.audit,
+    });
   });
 
   server.registerTool("list_issues", {
@@ -947,11 +1077,12 @@ export function createServer(config: Config): McpServer {
   });
 
   server.registerTool("run_gh", {
-    description: "Run an allowlisted, read-only GitHub CLI command. Arguments are passed directly without a shell.",
+    description: "Run an allowlisted, read-only GitHub CLI command. With a resource allowlist, only auth status is available; use typed repository tools for other reads.",
     inputSchema: { args: z.array(z.string().min(1)).min(1).max(40) },
     annotations: { readOnlyHint: true, destructiveHint: false },
   }, async ({ args }) => {
     assertSafeGhArguments(args);
+    assertRunGhAllowedByResourceScope(args, config);
     const result = await runGh(args, config);
     return response(result);
   });

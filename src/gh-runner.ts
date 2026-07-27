@@ -19,7 +19,7 @@ export async function runGh(args: readonly string[], config: Config, options: Ru
       shell: false,
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
-      env: restrictedEnvironment(),
+      env: restrictedEnvironment(process.env, config.accountProfile, config.allowedHosts),
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];

@@ -54,7 +54,7 @@ const transport = new StdioClientTransport({
   args: ["dist/cli.js"],
   env: {
     ...process.env,
-    GH_MCP_ALLOWED_OWNERS: "ma-nakaya",
+    GH_MCP_ALLOWED_OWNERS: "masa-nakaya,ma-nakaya",
     GH_MCP_AUDIT_LOG_PATH: join(tmpdir(), "onprem-gh-cli-mcp-smoke-audit.jsonl"),
   },
   stderr: "pipe",

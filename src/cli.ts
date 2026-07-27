@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { verifyAccountProfile } from "./account-profile.js";
 import { loadConfig } from "./config.js";
 import { createServer } from "./server.js";
 
 async function main(): Promise<void> {
-  const server = createServer(loadConfig());
+  const config = loadConfig();
+  await verifyAccountProfile(config);
+  const server = createServer(config);
   await server.connect(new StdioServerTransport());
 }
 

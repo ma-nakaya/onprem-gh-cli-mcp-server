@@ -7,6 +7,7 @@ export interface AuditRecord {
   timestamp?: string;
   tool: string;
   hostname: string;
+  account?: string;
   repository?: string;
   owner?: string;
   projectId?: string;
@@ -31,6 +32,7 @@ export async function appendAuditRecord(auditLogPath: string, record: AuditRecor
     timestamp: record.timestamp ?? new Date().toISOString(),
     tool: record.tool,
     hostname: record.hostname,
+    ...(record.account === undefined ? {} : { account: record.account }),
     ...(record.repository === undefined ? {} : { repository: record.repository }),
     ...(record.owner === undefined ? {} : { owner: record.owner }),
     ...(record.projectId === undefined ? {} : { projectId: record.projectId }),

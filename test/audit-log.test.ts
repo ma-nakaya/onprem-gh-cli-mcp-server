@@ -11,6 +11,38 @@ afterEach(async () => {
 });
 
 describe("audit log", () => {
+  it("records the selected account without retaining token-shaped extra fields", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "onprem-gh-cli-mcp-"));
+    temporaryDirectories.push(directory);
+    const auditLogPath = join(directory, "audit.jsonl");
+    const token = `ghp_${"a".repeat(36)}`;
+    const operation = {
+      timestamp: "2026-07-27T12:00:00.000Z",
+      tool: "create_issue",
+      hostname: "github.com",
+      account: "masa-nakaya",
+      repository: "masa-nakaya/example",
+      outcome: "succeeded" as const,
+      durationMs: 10,
+      token,
+    } as Parameters<typeof appendAuditRecord>[1] & { token: string };
+
+    await appendAuditRecord(auditLogPath, operation);
+
+    const text = await readFile(auditLogPath, "utf8");
+    expect(JSON.parse(text.trim())).toEqual({
+      timestamp: "2026-07-27T12:00:00.000Z",
+      tool: "create_issue",
+      hostname: "github.com",
+      account: "masa-nakaya",
+      repository: "masa-nakaya/example",
+      outcome: "succeeded",
+      durationMs: 10,
+    });
+    expect(text).not.toContain(token);
+    expect(text).not.toContain('"token"');
+  });
+
   it("writes metadata without operation content", async () => {
     const directory = await mkdtemp(join(tmpdir(), "onprem-gh-cli-mcp-"));
     temporaryDirectories.push(directory);
