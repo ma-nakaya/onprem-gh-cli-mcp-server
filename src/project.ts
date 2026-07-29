@@ -5,8 +5,14 @@ function objectResponse(value: unknown, label: string): Record<string, unknown> 
   return value as Record<string, unknown>;
 }
 
-function assertNoGraphqlErrors(value: Record<string, unknown>): void {
-  if (Array.isArray(value.errors) && value.errors.length > 0) {
+export function assertNoGraphqlErrors(value: unknown): void {
+  if (
+    value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Array.isArray((value as Record<string, unknown>).errors)
+    && ((value as Record<string, unknown>).errors as unknown[]).length > 0
+  ) {
     throw new Error("GitHub GraphQL returned one or more errors.");
   }
 }

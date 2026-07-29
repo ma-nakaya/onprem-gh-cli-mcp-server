@@ -5,8 +5,10 @@ export type AuditOutcome = "started" | "succeeded" | "failed";
 
 export interface AuditRecord {
   timestamp?: string;
+  operationId: string;
   tool: string;
   hostname: string;
+  account?: string;
   repository?: string;
   owner?: string;
   projectId?: string;
@@ -25,12 +27,15 @@ export interface AuditRecord {
   durationMs: number;
 }
 
-export async function appendAuditRecord(auditLogPath: string, record: AuditRecord): Promise<void> {
-  await mkdir(dirname(auditLogPath), { recursive: true });
+let auditWriteQueue: Promise<void> = Promise.resolve();
+
+export function appendAuditRecord(auditLogPath: string, record: AuditRecord): Promise<void> {
   const line = JSON.stringify({
     timestamp: record.timestamp ?? new Date().toISOString(),
+    operationId: record.operationId,
     tool: record.tool,
     hostname: record.hostname,
+    ...(record.account === undefined ? {} : { account: record.account }),
     ...(record.repository === undefined ? {} : { repository: record.repository }),
     ...(record.owner === undefined ? {} : { owner: record.owner }),
     ...(record.projectId === undefined ? {} : { projectId: record.projectId }),
@@ -48,5 +53,12 @@ export async function appendAuditRecord(auditLogPath: string, record: AuditRecor
     outcome: record.outcome,
     durationMs: record.durationMs,
   });
-  await appendFile(auditLogPath, `${line}\n`, { encoding: "utf8", mode: 0o600 });
+
+  const pendingWrite = auditWriteQueue.then(async () => {
+    await mkdir(dirname(auditLogPath), { recursive: true });
+    await appendFile(auditLogPath, `${line}\n`, { encoding: "utf8", mode: 0o600 });
+  });
+
+  auditWriteQueue = pendingWrite.catch(() => undefined);
+  return pendingWrite;
 }
