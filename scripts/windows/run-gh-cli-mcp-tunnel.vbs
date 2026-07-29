@@ -1,21 +1,19 @@
 Option Explicit
 
-Const ExpectedArgumentCount = 9
+Const ExpectedArgumentCount = 6
 Const TunnelClientPath = "C:\Apps\TunnelClient\tunnel-client.exe"
-Const WrapperVersion = "onprem-gh-cli-mcp-wrapper-v2"
+Const WrapperVersion = "onprem-gh-cli-mcp-wrapper-v3"
 
 Dim arguments
-Dim account
 Dim profileName
-Dim ghConfigDir
-Dim allowedOwners
-Dim allowedRepositories
+Dim accountsFile
+Dim allowedHosts
 Dim auditLogPath
 Dim logPath
-Dim hostname
 Dim ghPath
 Dim shell
 Dim processEnvironment
+Dim userEnvironment
 Dim fileSystem
 Dim command
 Dim exitCode
@@ -31,24 +29,16 @@ If arguments.Count <> ExpectedArgumentCount Then
     WScript.Quit 2
 End If
 
-account = arguments.Item(0)
-profileName = arguments.Item(1)
-ghConfigDir = arguments.Item(2)
-allowedOwners = arguments.Item(3)
-allowedRepositories = arguments.Item(4)
-auditLogPath = arguments.Item(5)
-logPath = arguments.Item(6)
-hostname = arguments.Item(7)
-ghPath = arguments.Item(8)
+profileName = arguments.Item(0)
+accountsFile = arguments.Item(1)
+allowedHosts = arguments.Item(2)
+auditLogPath = arguments.Item(3)
+logPath = arguments.Item(4)
+ghPath = arguments.Item(5)
 
-If Not IsSafeIdentifier(account) Then WScript.Quit 2
 If Not IsSafeIdentifier(profileName) Then WScript.Quit 2
-If LCase(profileName) <> "gh-cli-" & LCase(account) Then WScript.Quit 2
-If Not IsSafeCsv(allowedOwners, False) Then WScript.Quit 2
-If Not IsSafeCsv(allowedRepositories, True) Then WScript.Quit 2
-If Len(allowedOwners) = 0 And Len(allowedRepositories) = 0 Then WScript.Quit 2
-If Not IsSafeHostname(hostname) Then WScript.Quit 2
-If Not IsSafeAbsolutePath(ghConfigDir) Then WScript.Quit 2
+If Not IsSafeAbsolutePath(accountsFile) Then WScript.Quit 2
+If Not IsSafeHostnameCsv(allowedHosts) Then WScript.Quit 2
 If Not IsSafeAbsolutePath(auditLogPath) Then WScript.Quit 2
 If Not IsSafeAbsolutePath(logPath) Then WScript.Quit 2
 If Not IsSafeAbsolutePath(ghPath) Then WScript.Quit 2
@@ -56,24 +46,37 @@ If Not IsSafeAbsolutePath(ghPath) Then WScript.Quit 2
 Set fileSystem = CreateObject("Scripting.FileSystemObject")
 If Not fileSystem.FileExists(TunnelClientPath) Then WScript.Quit 3
 If Not fileSystem.FileExists(ghPath) Then WScript.Quit 3
-If Not fileSystem.FolderExists(ghConfigDir) Then WScript.Quit 3
+If Not fileSystem.FileExists(accountsFile) Then WScript.Quit 3
+If Not fileSystem.FolderExists(fileSystem.GetParentFolderName(auditLogPath)) Then WScript.Quit 3
 If Not fileSystem.FolderExists(fileSystem.GetParentFolderName(logPath)) Then WScript.Quit 3
 
 Set shell = CreateObject("WScript.Shell")
 Set processEnvironment = shell.Environment("PROCESS")
+Set userEnvironment = shell.Environment("USER")
 
-' The runtime API key must be inherited from an approved user, machine, or secret-store
-' environment. It is intentionally never accepted as a command-line argument.
-If Len(processEnvironment("CONTROL_PLANE_API_KEY")) = 0 Then WScript.Quit 4
+' This wrapper accepts the runtime API key only from the current User's
+' persistent environment. A Machine-only value and command-line arguments are
+' not accepted.
+If Len(userEnvironment("CONTROL_PLANE_API_KEY")) = 0 Then WScript.Quit 4
+processEnvironment("CONTROL_PLANE_API_KEY") = userEnvironment("CONTROL_PLANE_API_KEY")
 
-processEnvironment("GH_CONFIG_DIR") = ghConfigDir
-processEnvironment("GH_HOST") = hostname
-processEnvironment("GH_MCP_ACCOUNT_HOST") = hostname
-processEnvironment("GH_MCP_EXPECTED_LOGIN") = account
+' Account credentials remain in the separate GH_CONFIG_DIR values named by the
+' non-secret manifest. Never inherit an ambient token or active-account selector.
+RemoveProcessVariable processEnvironment, "GH_TOKEN"
+RemoveProcessVariable processEnvironment, "GITHUB_TOKEN"
+RemoveProcessVariable processEnvironment, "GH_ENTERPRISE_TOKEN"
+RemoveProcessVariable processEnvironment, "GITHUB_ENTERPRISE_TOKEN"
+RemoveProcessVariable processEnvironment, "GH_CONFIG_DIR"
+RemoveProcessVariable processEnvironment, "GH_HOST"
+RemoveProcessVariable processEnvironment, "GH_MCP_EXPECTED_LOGIN"
+RemoveProcessVariable processEnvironment, "GH_MCP_ACCOUNT_HOST"
+RemoveProcessVariable processEnvironment, "GH_MCP_ALLOWED_HOSTS"
+RemoveProcessVariable processEnvironment, "GH_MCP_ALLOWED_OWNERS"
+RemoveProcessVariable processEnvironment, "GH_MCP_ALLOWED_REPOSITORIES"
+
+processEnvironment("GH_MCP_ACCOUNTS_FILE") = accountsFile
 processEnvironment("GH_MCP_GH_PATH") = ghPath
-processEnvironment("GH_MCP_ALLOWED_HOSTS") = hostname
-processEnvironment("GH_MCP_ALLOWED_OWNERS") = allowedOwners
-processEnvironment("GH_MCP_ALLOWED_REPOSITORIES") = allowedRepositories
+processEnvironment("GH_MCP_ALLOWED_HOSTS") = allowedHosts
 processEnvironment("GH_MCP_AUDIT_LOG_PATH") = auditLogPath
 
 command = QuoteArgument(TunnelClientPath) _
@@ -87,24 +90,8 @@ Function IsSafeIdentifier(value)
     IsSafeIdentifier = Matches(value, "^[A-Za-z0-9_.-]+$")
 End Function
 
-Function IsSafeHostname(value)
-    IsSafeHostname = Matches(value, "^[A-Za-z0-9.-]+$")
-End Function
-
-Function IsSafeCsv(value, repositoryFormat)
-    Dim pattern
-
-    If Len(value) = 0 Then
-        IsSafeCsv = True
-        Exit Function
-    End If
-
-    If repositoryFormat Then
-        pattern = "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)*$"
-    Else
-        pattern = "^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$"
-    End If
-    IsSafeCsv = Matches(value, pattern)
+Function IsSafeHostnameCsv(value)
+    IsSafeHostnameCsv = Matches(value, "^[A-Za-z0-9.-]+(,[A-Za-z0-9.-]+)*$")
 End Function
 
 Function IsSafeAbsolutePath(value)
@@ -120,6 +107,12 @@ Function Matches(value, pattern)
     expression.Global = False
     Matches = expression.Test(value)
 End Function
+
+Sub RemoveProcessVariable(environment, name)
+    On Error Resume Next
+    environment.Remove name
+    On Error GoTo 0
+End Sub
 
 Function QuoteArgument(value)
     QuoteArgument = Chr(34) & value & Chr(34)

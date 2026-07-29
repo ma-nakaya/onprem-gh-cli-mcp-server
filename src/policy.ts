@@ -1,4 +1,4 @@
-import type { Config } from "./config.js";
+import type { RequestContext } from "./config.js";
 
 const SAFE_COMMANDS: Readonly<Record<string, ReadonlySet<string>>> = {
   auth: new Set(["status"]),
@@ -89,11 +89,11 @@ export function assertSafeGhArguments(args: readonly string[]): void {
   if (command === "auth") assertSafeAuthStatusArguments(args);
 }
 
-export function hasResourceAllowlist(config: Config): boolean {
-  return config.allowedOwners.size > 0 || config.allowedRepositories.size > 0;
+export function hasResourceAllowlist(context: RequestContext): boolean {
+  return context.profile.allowedOwners.size > 0 || context.profile.allowedRepositories.size > 0;
 }
 
-function assertRepositorySpecifierHostAllowed(repository: string, config: Config): void {
+function assertRepositorySpecifierHostAllowed(repository: string, context: RequestContext): void {
   const value = repository.trim();
   let hostname: string | undefined;
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) {
@@ -106,13 +106,13 @@ function assertRepositorySpecifierHostAllowed(repository: string, config: Config
     const parts = value.split("/");
     if (parts.length >= 3) [hostname] = parts;
   }
-  if (hostname !== undefined && hostname.length > 0) assertHostAllowed(hostname, config);
+  if (hostname !== undefined && hostname.length > 0) assertHostAllowed(hostname, context);
 }
 
-function assertRepositoryArgumentHosts(args: readonly string[], config: Config): void {
+function assertRepositoryArgumentHosts(args: readonly string[], context: RequestContext): void {
   for (const argument of args.slice(1)) {
     if (/^[a-z][a-z0-9+.-]*:\/\//i.test(argument)) {
-      assertRepositorySpecifierHostAllowed(argument, config);
+      assertRepositorySpecifierHostAllowed(argument, context);
     }
   }
   for (let index = 2; index < args.length; index += 1) {
@@ -121,19 +121,19 @@ function assertRepositoryArgumentHosts(args: readonly string[], config: Config):
     if (normalized === "--repo" || argument === "-R") {
       const repository = args[index + 1];
       if (repository === undefined || repository.length === 0) throw new Error(`${argument} requires a repository value.`);
-      assertRepositorySpecifierHostAllowed(repository, config);
+      assertRepositorySpecifierHostAllowed(repository, context);
       index += 1;
       continue;
     }
     if (normalized.startsWith("--repo=")) {
-      assertRepositorySpecifierHostAllowed(argument.slice(argument.indexOf("=") + 1), config);
+      assertRepositorySpecifierHostAllowed(argument.slice(argument.indexOf("=") + 1), context);
       continue;
     }
     if (/^-[^-].*R/.test(argument) && !argument.startsWith("-R")) {
       throw new Error("Bundled -R repository options are not allowed. Use --repo.");
     }
     if (argument.startsWith("-R") && argument.length > 2) {
-      assertRepositorySpecifierHostAllowed(argument.slice(2), config);
+      assertRepositorySpecifierHostAllowed(argument.slice(2), context);
     }
   }
 
@@ -156,12 +156,15 @@ function assertRepositoryArgumentHosts(args: readonly string[], config: Config):
       continue;
     }
     if (!optionsEnded && argument.startsWith("-")) continue;
-    assertRepositorySpecifierHostAllowed(argument, config);
+    assertRepositorySpecifierHostAllowed(argument, context);
     return;
   }
 }
 
-export function assertRunGhAllowedByResourceScope(args: readonly string[], config: Config): void {
+export function assertRunGhAllowedByResourceScope(
+  args: readonly string[],
+  context: RequestContext,
+): void {
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     const normalized = argument.toLowerCase();
@@ -173,62 +176,80 @@ export function assertRunGhAllowedByResourceScope(args: readonly string[], confi
       if (hostname === undefined || hostname.length === 0) {
         throw new Error("--hostname requires a hostname value.");
       }
-      assertHostAllowed(hostname, config);
+      assertHostAllowed(hostname, context);
       index += 1;
     } else if (normalized.startsWith("--hostname=")) {
       const hostname = argument.slice(argument.indexOf("=") + 1);
       if (hostname.length === 0) throw new Error("--hostname requires a hostname value.");
-      assertHostAllowed(hostname, config);
+      assertHostAllowed(hostname, context);
     }
   }
-  assertRepositoryArgumentHosts(args, config);
+  assertRepositoryArgumentHosts(args, context);
 
-  if (!hasResourceAllowlist(config)) return;
+  if (!hasResourceAllowlist(context)) return;
   if (args[0]?.toLowerCase() === "auth" && args[1]?.toLowerCase() === "status") {
     return;
   }
   throw new Error("run_gh is limited to auth status when a resource allowlist is configured. Use a typed repository tool.");
 }
 
-export function assertRepositoryAllowed(repository: string, config: Config): void {
+export function assertRepositoryAllowed(repository: string, context: RequestContext): void {
   const normalized = repository.trim().toLowerCase();
   if (!/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/i.test(normalized)) throw new Error("Repository must use owner/name format.");
   const owner = normalized.split("/", 1)[0];
-  if (config.allowedRepositories.size > 0 && !config.allowedRepositories.has(normalized)) throw new Error(`Repository is not allowed: ${repository}`);
-  if (config.allowedOwners.size > 0 && !config.allowedOwners.has(owner)) throw new Error(`Repository owner is not allowed: ${owner}`);
-}
-
-export function assertOwnerAllowed(owner: string, config: Config): void {
-  const normalized = owner.trim().toLowerCase();
-  if (!/^[a-z0-9_.-]+$/i.test(normalized)) throw new Error("Owner must be a GitHub user or organization login.");
-  if (config.allowedOwners.size > 0) {
-    if (!config.allowedOwners.has(normalized)) throw new Error(`Owner is not allowed: ${owner}`);
-    return;
+  if (
+    context.profile.allowedRepositories.size > 0
+    && !context.profile.allowedRepositories.has(normalized)
+  ) {
+    throw new Error(`Repository is not allowed for account '${context.accountId}': ${repository}`);
   }
-  if (config.allowedRepositories.size > 0) {
-    throw new Error("Owner-wide operations require an explicit GH_MCP_ALLOWED_OWNERS entry.");
+  if (context.profile.allowedOwners.size > 0 && !context.profile.allowedOwners.has(owner)) {
+    throw new Error(`Repository owner is not allowed for account '${context.accountId}': ${owner}`);
   }
 }
 
-export function assertRepositoryListOwnerAllowed(owner: string, config: Config): void {
+export function assertOwnerAllowed(owner: string, context: RequestContext): void {
   const normalized = owner.trim().toLowerCase();
   if (!/^[a-z0-9_.-]+$/i.test(normalized)) throw new Error("Owner must be a GitHub user or organization login.");
-  if (config.allowedOwners.size > 0) {
-    if (!config.allowedOwners.has(normalized)) throw new Error(`Owner is not allowed: ${owner}`);
+  if (context.profile.allowedOwners.size > 0) {
+    if (!context.profile.allowedOwners.has(normalized)) {
+      throw new Error(`Owner is not allowed for account '${context.accountId}': ${owner}`);
+    }
     return;
   }
-  if (config.allowedRepositories.size > 0) {
-    const ownerIsRepresented = [...config.allowedRepositories].some(
+  if (context.profile.allowedRepositories.size > 0) {
+    throw new Error(
+      `Owner-wide operations require an explicit allowedOwners entry for account '${context.accountId}'.`,
+    );
+  }
+}
+
+export function assertRepositoryListOwnerAllowed(owner: string, context: RequestContext): void {
+  const normalized = owner.trim().toLowerCase();
+  if (!/^[a-z0-9_.-]+$/i.test(normalized)) throw new Error("Owner must be a GitHub user or organization login.");
+  if (context.profile.allowedOwners.size > 0) {
+    if (!context.profile.allowedOwners.has(normalized)) {
+      throw new Error(`Owner is not allowed for account '${context.accountId}': ${owner}`);
+    }
+    return;
+  }
+  if (context.profile.allowedRepositories.size > 0) {
+    const ownerIsRepresented = [...context.profile.allowedRepositories].some(
       (repository) => repository.split("/", 1)[0] === normalized,
     );
-    if (!ownerIsRepresented) throw new Error(`Owner is not allowed by the repository allowlist: ${owner}`);
+    if (!ownerIsRepresented) {
+      throw new Error(
+        `Owner is not allowed by account '${context.accountId}' repository allowlist: ${owner}`,
+      );
+    }
   }
 }
 
-export function assertHostAllowed(host: string, config: Config): void {
+export function assertHostAllowed(host: string, context: RequestContext): void {
   const normalized = host.trim().toLowerCase();
-  if (!config.allowedHosts.has(normalized)) throw new Error(`GitHub host is not allowed: ${host}`);
-  if (config.accountProfile !== undefined && config.accountProfile.hostname !== normalized) {
-    throw new Error(`GitHub host does not match the fixed account profile: ${host}`);
+  if (context.profile.hostname !== normalized) {
+    throw new Error(
+      `GitHub host does not match account profile '${context.accountId}': ${host}`,
+    );
   }
 }

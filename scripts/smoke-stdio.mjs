@@ -1,9 +1,11 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const expectedTools = [
+  "list_accounts",
   "get_auth_status",
   "get_branch",
   "create_branch",
@@ -49,14 +51,59 @@ const forbiddenTools = [
   "show_token",
 ];
 
+const smokeDirectory = await mkdtemp(join(tmpdir(), "onprem-gh-cli-mcp-smoke-"));
+const maConfigDirectory = join(smokeDirectory, "gh-ma-nakaya");
+const masaConfigDirectory = join(smokeDirectory, "gh-masa-nakaya");
+const accountsFile = join(smokeDirectory, "accounts.json");
+await mkdir(maConfigDirectory);
+await mkdir(masaConfigDirectory);
+await writeFile(accountsFile, JSON.stringify({
+  version: 1,
+  accounts: [
+    {
+      id: "ma-nakaya",
+      expectedLogin: "ma-nakaya",
+      hostname: "github.com",
+      configDir: maConfigDirectory,
+      allowedOwners: ["ma-nakaya"],
+      allowedRepositories: [],
+    },
+    {
+      id: "masa-nakaya",
+      expectedLogin: "masa-nakaya",
+      hostname: "github.com",
+      configDir: masaConfigDirectory,
+      allowedOwners: ["masa-nakaya"],
+      allowedRepositories: [],
+    },
+  ],
+}), { encoding: "utf8", mode: 0o600 });
+
+const childEnvironment = {
+  ...process.env,
+  GH_MCP_ACCOUNTS_FILE: accountsFile,
+  GH_MCP_ALLOWED_HOSTS: "github.com",
+  GH_MCP_AUDIT_LOG_PATH: join(smokeDirectory, "audit.jsonl"),
+};
+for (const name of [
+  "GH_CONFIG_DIR",
+  "GH_HOST",
+  "GH_TOKEN",
+  "GITHUB_TOKEN",
+  "GH_ENTERPRISE_TOKEN",
+  "GITHUB_ENTERPRISE_TOKEN",
+  "GH_MCP_EXPECTED_LOGIN",
+  "GH_MCP_ACCOUNT_HOST",
+  "GH_MCP_ALLOWED_OWNERS",
+  "GH_MCP_ALLOWED_REPOSITORIES",
+]) {
+  delete childEnvironment[name];
+}
+
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: ["dist/cli.js"],
-  env: {
-    ...process.env,
-    GH_MCP_ALLOWED_OWNERS: "masa-nakaya,ma-nakaya",
-    GH_MCP_AUDIT_LOG_PATH: join(tmpdir(), "onprem-gh-cli-mcp-smoke-audit.jsonl"),
-  },
+  env: childEnvironment,
   stderr: "pipe",
 });
 const client = new Client({ name: "onprem-gh-cli-mcp-smoke", version: "0.1.0" });
@@ -74,6 +121,11 @@ try {
   for (const name of expectedTools) {
     if (!tools.has(name)) throw new Error(`Expected MCP tool is missing: ${name}`);
   }
+  const expectedToolSet = new Set(expectedTools);
+  const unexpectedTools = [...tools.keys()].filter((name) => !expectedToolSet.has(name));
+  if (unexpectedTools.length > 0) {
+    throw new Error(`Unexpected MCP tools were exposed: ${unexpectedTools.join(", ")}`);
+  }
   for (const name of forbiddenTools) {
     if (tools.has(name)) throw new Error(`Forbidden MCP tool was exposed: ${name}`);
   }
@@ -83,9 +135,27 @@ try {
   if (tools.get("dispatch_workflow")?.annotations?.destructiveHint !== true) {
     throw new Error("dispatch_workflow must retain its high-impact hint.");
   }
+  for (const name of expectedTools) {
+    const inputSchema = tools.get(name)?.inputSchema;
+    const required = Array.isArray(inputSchema?.required) ? inputSchema.required : [];
+    const properties = inputSchema?.properties ?? {};
+    if (name === "list_accounts") {
+      if (required.includes("account") || Object.hasOwn(properties, "account")) {
+        throw new Error("list_accounts must not require or expose an account selector.");
+      }
+      continue;
+    }
+    if (!required.includes("account")) {
+      throw new Error(`account must be required for ${name} when multiple profiles are configured.`);
+    }
+    if (!Object.hasOwn(properties, "account")) {
+      throw new Error(`Account selector schema is missing for ${name}.`);
+    }
+  }
 
   process.stdout.write(`stdio MCP smoke test passed: ${tools.size} tools discovered.\n`);
 } finally {
   clearTimeout(timeout);
   await client.close();
+  await rm(smokeDirectory, { recursive: true, force: true });
 }

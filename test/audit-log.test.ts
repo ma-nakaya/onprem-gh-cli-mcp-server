@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -18,6 +18,7 @@ describe("audit log", () => {
     const token = `ghp_${"a".repeat(36)}`;
     const operation = {
       timestamp: "2026-07-27T12:00:00.000Z",
+      operationId: "operation-secret-redaction",
       tool: "create_issue",
       hostname: "github.com",
       account: "masa-nakaya",
@@ -32,6 +33,7 @@ describe("audit log", () => {
     const text = await readFile(auditLogPath, "utf8");
     expect(JSON.parse(text.trim())).toEqual({
       timestamp: "2026-07-27T12:00:00.000Z",
+      operationId: "operation-secret-redaction",
       tool: "create_issue",
       hostname: "github.com",
       account: "masa-nakaya",
@@ -50,6 +52,7 @@ describe("audit log", () => {
 
     await appendAuditRecord(auditLogPath, {
       timestamp: "2026-07-17T10:00:00.000Z",
+      operationId: "operation-issue-comment",
       tool: "comment_issue",
       hostname: "github.com",
       repository: "ma-nakaya/example",
@@ -62,6 +65,7 @@ describe("audit log", () => {
     const record = JSON.parse(text.trim()) as Record<string, unknown>;
     expect(record).toEqual({
       timestamp: "2026-07-17T10:00:00.000Z",
+      operationId: "operation-issue-comment",
       tool: "comment_issue",
       hostname: "github.com",
       repository: "ma-nakaya/example",
@@ -80,6 +84,7 @@ describe("audit log", () => {
 
     await appendAuditRecord(auditLogPath, {
       timestamp: "2026-07-22T01:00:00.000Z",
+      operationId: "operation-pr-review",
       tool: "review_pull_request",
       hostname: "github.com",
       repository: "ma-nakaya/example",
@@ -91,6 +96,7 @@ describe("audit log", () => {
     const text = await readFile(auditLogPath, "utf8");
     expect(JSON.parse(text.trim())).toEqual({
       timestamp: "2026-07-22T01:00:00.000Z",
+      operationId: "operation-pr-review",
       tool: "review_pull_request",
       hostname: "github.com",
       repository: "ma-nakaya/example",
@@ -108,6 +114,7 @@ describe("audit log", () => {
 
     await appendAuditRecord(auditLogPath, {
       timestamp: "2026-07-22T04:00:00.000Z",
+      operationId: "operation-release-update",
       tool: "update_release",
       hostname: "github.com",
       repository: "ma-nakaya/example",
@@ -119,6 +126,7 @@ describe("audit log", () => {
     const text = await readFile(auditLogPath, "utf8");
     expect(JSON.parse(text.trim())).toEqual({
       timestamp: "2026-07-22T04:00:00.000Z",
+      operationId: "operation-release-update",
       tool: "update_release",
       hostname: "github.com",
       repository: "ma-nakaya/example",
@@ -136,6 +144,7 @@ describe("audit log", () => {
 
     await appendAuditRecord(auditLogPath, {
       timestamp: "2026-07-22T04:30:00.000Z",
+      operationId: "operation-workflow-dispatch",
       tool: "dispatch_workflow",
       hostname: "github.com",
       repository: "ma-nakaya/example",
@@ -147,6 +156,7 @@ describe("audit log", () => {
     const text = await readFile(auditLogPath, "utf8");
     expect(JSON.parse(text.trim())).toEqual({
       timestamp: "2026-07-22T04:30:00.000Z",
+      operationId: "operation-workflow-dispatch",
       tool: "dispatch_workflow",
       hostname: "github.com",
       repository: "ma-nakaya/example",
@@ -165,6 +175,7 @@ describe("audit log", () => {
 
     await appendAuditRecord(auditLogPath, {
       timestamp: "2026-07-22T05:00:00.000Z",
+      operationId: "operation-label-update",
       tool: "update_label",
       hostname: "github.com",
       repository: "ma-nakaya/example",
@@ -174,6 +185,7 @@ describe("audit log", () => {
     });
     await appendAuditRecord(auditLogPath, {
       timestamp: "2026-07-22T05:01:00.000Z",
+      operationId: "operation-milestone-update",
       tool: "update_milestone",
       hostname: "github.com",
       repository: "ma-nakaya/example",
@@ -195,6 +207,7 @@ describe("audit log", () => {
 
     await appendAuditRecord(auditLogPath, {
       timestamp: "2026-07-22T05:10:00.000Z",
+      operationId: "operation-project-update",
       tool: "update_project",
       hostname: "github.com",
       owner: "ma-nakaya",
@@ -206,6 +219,7 @@ describe("audit log", () => {
     const text = await readFile(auditLogPath, "utf8");
     expect(JSON.parse(text.trim())).toEqual({
       timestamp: "2026-07-22T05:10:00.000Z",
+      operationId: "operation-project-update",
       tool: "update_project",
       hostname: "github.com",
       owner: "ma-nakaya",
@@ -214,5 +228,62 @@ describe("audit log", () => {
       durationMs: 15,
     });
     expect(text).not.toContain("project readme");
+  });
+
+  it("serializes concurrent writes in invocation order as complete JSONL records", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "onprem-gh-cli-mcp-"));
+    temporaryDirectories.push(directory);
+    const auditLogPath = join(directory, "audit.jsonl");
+    const operationIds = Array.from({ length: 100 }, (_, index) => `operation-${index}`);
+
+    await Promise.all(
+      operationIds.map((operationId, index) =>
+        appendAuditRecord(auditLogPath, {
+          timestamp: "2026-07-22T06:00:00.000Z",
+          operationId,
+          tool: "concurrent_operation",
+          hostname: "github.com",
+          outcome: "succeeded",
+          durationMs: index,
+        }),
+      ),
+    );
+
+    const records = (await readFile(auditLogPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { operationId: string });
+    expect(records).toHaveLength(operationIds.length);
+    expect(records.map((record) => record.operationId)).toEqual(operationIds);
+  });
+
+  it("continues processing queued writes after an earlier write fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "onprem-gh-cli-mcp-"));
+    temporaryDirectories.push(directory);
+    const invalidAuditLogPath = join(directory, "not-a-file");
+    const validAuditLogPath = join(directory, "audit.jsonl");
+    await mkdir(invalidAuditLogPath);
+
+    const failedWrite = appendAuditRecord(invalidAuditLogPath, {
+      operationId: "operation-failed-write",
+      tool: "failed_operation",
+      hostname: "github.com",
+      outcome: "failed",
+      durationMs: 1,
+    });
+    const succeedingWrite = appendAuditRecord(validAuditLogPath, {
+      operationId: "operation-after-failure",
+      tool: "later_operation",
+      hostname: "github.com",
+      outcome: "succeeded",
+      durationMs: 2,
+    });
+
+    await expect(failedWrite).rejects.toThrow();
+    await expect(succeedingWrite).resolves.toBeUndefined();
+    expect(JSON.parse((await readFile(validAuditLogPath, "utf8")).trim())).toMatchObject({
+      operationId: "operation-after-failure",
+      tool: "later_operation",
+    });
   });
 });

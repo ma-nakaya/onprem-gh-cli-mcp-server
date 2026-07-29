@@ -1,12 +1,15 @@
+import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { loginFromUserApi, verifyAccountProfile } from "./account-profile.js";
+import {
+  resolveAccountContext,
+  verifyAccountProfile,
+} from "./account-profile.js";
 import { appendAuditRecord } from "./audit-log.js";
-import type { Config } from "./config.js";
+import type { Config, RequestContext } from "./config.js";
 import { runGh } from "./gh-runner.js";
 import type { RunGhOptions } from "./gh-runner.js";
 import {
-  assertHostAllowed,
   assertOwnerAllowed,
   assertRepositoryAllowed,
   assertRepositoryListOwnerAllowed,
@@ -18,7 +21,7 @@ import { assertReviewBody, pullRequestReviewSummary, pullRequestSummary } from "
 import { assertDraftRelease, releaseIdentifier, releaseSummary } from "./release.js";
 import { assertActiveWorkflow, isWorkflowIdentifier, normalizeWorkflowInputs, workflowSummary } from "./workflow.js";
 import { isLabelColor, isUtcTimestamp, labelSummary, milestoneIdentifier, milestoneSummary } from "./repository-metadata.js";
-import { assertProjectOwner, buildUpdateProjectMutation, graphqlProject, graphqlProjectItem, ownerNodeId, projectFieldValue, projectFieldsSummary, projectIdentifier, projectItemsSummary, projectItemSummary, projectSummary } from "./project.js";
+import { assertNoGraphqlErrors, assertProjectOwner, buildUpdateProjectMutation, graphqlProject, graphqlProjectItem, ownerNodeId, projectFieldValue, projectFieldsSummary, projectIdentifier, projectItemsSummary, projectItemSummary, projectSummary } from "./project.js";
 import { assertRepositoryPath, assertWritableBranch, branchHeadSha, branchSummary, commitTreeSha, encodeGitRef, gitObjectSha } from "./git-data.js";
 
 function response(value: unknown) {
@@ -26,35 +29,82 @@ function response(value: unknown) {
   return { content: [{ type: "text" as const, text }] };
 }
 
-async function jsonGh(args: string[], config: Config, options: RunGhOptions = {}): Promise<unknown> {
-  const result = await runGh(args, config, options);
+async function verifiedRequestContext(
+  config: Config,
+  account?: string,
+  hostname?: string,
+): Promise<RequestContext> {
+  const context = resolveAccountContext(config, account, hostname);
+  await verifyAccountProfile(config, context);
+  return context;
+}
+
+async function jsonGh(
+  args: string[],
+  config: Config,
+  context: RequestContext,
+  options: RunGhOptions = {},
+): Promise<unknown> {
+  const result = await runGh(args, config, context, options);
   try { return JSON.parse(result.stdout || "null"); }
   catch { throw new Error("GitHub CLI returned invalid JSON."); }
 }
 
-async function assertStandaloneIssue(repository: string, issueNumber: number, hostname: string, config: Config): Promise<void> {
-  const value = await jsonGh(["api", `repos/${repository}/issues/${issueNumber}`, "--hostname", hostname], config);
+async function assertStandaloneIssue(
+  repository: string,
+  issueNumber: number,
+  config: Config,
+  context: RequestContext,
+): Promise<void> {
+  const value = await jsonGh([
+    "api",
+    `repos/${repository}/issues/${issueNumber}`,
+    "--hostname",
+    context.profile.hostname,
+  ], config, context);
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("GitHub API returned an unexpected issue response.");
   const item = value as Record<string, unknown>;
   if (item.pull_request !== undefined) throw new Error(`Issue #${issueNumber} is a pull request. Use a Pull Request-specific tool instead.`);
 }
 
-async function assertPullRequest(repository: string, pullRequestNumber: number, hostname: string, config: Config): Promise<void> {
-  await jsonGh(["api", `repos/${repository}/pulls/${pullRequestNumber}`, "--hostname", hostname], config);
+async function assertPullRequest(
+  repository: string,
+  pullRequestNumber: number,
+  config: Config,
+  context: RequestContext,
+): Promise<void> {
+  await jsonGh([
+    "api",
+    `repos/${repository}/pulls/${pullRequestNumber}`,
+    "--hostname",
+    context.profile.hostname,
+  ], config, context);
 }
 
-async function assertProjectAccess(projectId: string, owner: string, hostname: string, config: Config): Promise<void> {
+async function assertProjectAccess(
+  projectId: string,
+  owner: string,
+  config: Config,
+  context: RequestContext,
+): Promise<void> {
   const query = `query($projectId: ID!) { node(id: $projectId) { __typename ... on ProjectV2 { id owner { ... on User { login } ... on Organization { login } } } } }`;
-  const value = await jsonGh(["api", "graphql", "--hostname", hostname, "--method", "POST", "--input", "-"], config, {
-    stdin: JSON.stringify({ query, variables: { projectId } }),
-  });
+  const value = await jsonGh([
+    "api",
+    "graphql",
+    "--hostname",
+    context.profile.hostname,
+    "--method",
+    "POST",
+    "--input",
+    "-",
+  ], config, context, { stdin: JSON.stringify({ query, variables: { projectId } }) });
   assertProjectOwner(value, owner);
 }
 
 interface AuditTarget {
   tool: string;
   hostname: string;
-  account?: string;
+  account: string;
   repository?: string;
   owner?: string;
   projectId?: string;
@@ -71,22 +121,34 @@ interface AuditTarget {
   milestoneNumber?: number;
 }
 
-function accountScopedTarget(target: AuditTarget, config: Config): AuditTarget {
-  return config.accountProfile === undefined
-    ? target
-    : { ...target, account: config.accountProfile.expectedLogin };
+type AuditTargetInput = Omit<AuditTarget, "hostname" | "account">;
+
+interface WriteRequest {
+  readonly context: RequestContext;
+  readonly operationId: string;
+  readonly target: AuditTarget;
 }
 
-async function verifyWriteAccount(target: AuditTarget, config: Config): Promise<AuditTarget> {
-  const scopedTarget = accountScopedTarget(target, config);
+function accountScopedTarget(
+  target: AuditTargetInput,
+  context: RequestContext,
+): AuditTarget {
+  return {
+    ...target,
+    hostname: context.profile.hostname,
+    account: context.accountId,
+  };
+}
+
+async function verifyWriteAccount(request: WriteRequest, config: Config): Promise<void> {
   const startedAt = Date.now();
   try {
-    await verifyAccountProfile(config);
-    return scopedTarget;
+    await verifyAccountProfile(config, request.context);
   } catch (error) {
     try {
       await appendAuditRecord(config.auditLogPath, {
-        ...scopedTarget,
+        ...request.target,
+        operationId: request.operationId,
         outcome: "failed",
         durationMs: Date.now() - startedAt,
       });
@@ -97,39 +159,44 @@ async function verifyWriteAccount(target: AuditTarget, config: Config): Promise<
   }
 }
 
+async function prepareWriteRequest(
+  target: AuditTargetInput,
+  config: Config,
+  account?: string,
+  hostname?: string,
+): Promise<WriteRequest> {
+  const context = resolveAccountContext(config, account, hostname);
+  const request = Object.freeze({
+    context,
+    operationId: randomUUID(),
+    target: accountScopedTarget(target, context),
+  });
+  await verifyWriteAccount(request, config);
+  return request;
+}
+
 async function auditedOperation<T>(
-  target: AuditTarget,
+  request: WriteRequest,
   config: Config,
   operation: () => Promise<T>,
-  completedTarget?: (value: T) => Partial<AuditTarget>,
+  completedTarget?: (value: T) => Partial<AuditTargetInput>,
 ): Promise<{ value: T; audit: { started: true; completed: boolean } }> {
-  const scopedTarget = await verifyWriteAccount(target, config);
   const startedAt = Date.now();
   await appendAuditRecord(config.auditLogPath, {
-    ...scopedTarget,
+    ...request.target,
+    operationId: request.operationId,
     outcome: "started",
     durationMs: 0,
   });
+  let value: T;
   try {
-    const value = await operation();
-    const finalTarget = completedTarget === undefined
-      ? scopedTarget
-      : { ...scopedTarget, ...completedTarget(value) };
-    let completed = true;
-    try {
-      await appendAuditRecord(config.auditLogPath, {
-        ...finalTarget,
-        outcome: "succeeded",
-        durationMs: Date.now() - startedAt,
-      });
-    } catch {
-      completed = false;
-    }
-    return { value, audit: { started: true, completed } };
+    await verifyAccountProfile(config, request.context);
+    value = await operation();
   } catch (error) {
     try {
       await appendAuditRecord(config.auditLogPath, {
-        ...scopedTarget,
+        ...request.target,
+        operationId: request.operationId,
         outcome: "failed",
         durationMs: Date.now() - startedAt,
       });
@@ -138,19 +205,71 @@ async function auditedOperation<T>(
     }
     throw error;
   }
+
+  let completionMetadataError: unknown;
+  let finalTarget = request.target;
+  if (completedTarget !== undefined) {
+    try {
+      finalTarget = { ...request.target, ...completedTarget(value) };
+    } catch (error) {
+      // The remote mutation already succeeded. Preserve that audit outcome even
+      // if an unexpected response shape prevents optional target enrichment.
+      completionMetadataError = error;
+    }
+  }
+
+  let completed = true;
+  try {
+    await appendAuditRecord(config.auditLogPath, {
+      ...finalTarget,
+      operationId: request.operationId,
+      outcome: "succeeded",
+      durationMs: Date.now() - startedAt,
+    });
+  } catch {
+    completed = false;
+  }
+  if (completionMetadataError !== undefined) throw completionMetadataError;
+  return { value, audit: { started: true, completed } };
 }
 
 async function auditedJsonGh(
-  target: AuditTarget,
+  request: WriteRequest,
   args: string[],
   payload: Record<string, unknown>,
   config: Config,
-  completedTarget?: (value: unknown) => Partial<AuditTarget>,
+  completedTarget?: (value: unknown) => Partial<AuditTargetInput>,
 ): Promise<{ value: unknown; audit: { started: true; completed: boolean } }> {
   return auditedOperation(
-    target,
+    request,
     config,
-    () => jsonGh(args, config, { stdin: JSON.stringify(payload) }),
+    () => jsonGh(args, config, request.context, { stdin: JSON.stringify(payload) }),
+    completedTarget,
+  );
+}
+
+async function auditedGraphqlGh(
+  request: WriteRequest,
+  args: string[],
+  payload: Record<string, unknown>,
+  config: Config,
+  completedTarget?: (value: unknown) => Partial<AuditTargetInput>,
+): Promise<{ value: unknown; audit: { started: true; completed: boolean } }> {
+  return auditedOperation(
+    request,
+    config,
+    async () => {
+      const value = await jsonGh(
+        args,
+        config,
+        request.context,
+        { stdin: JSON.stringify(payload) },
+      );
+      // GitHub GraphQL can reject a mutation through a top-level errors array
+      // while gh still exits zero. Validate that before recording success.
+      assertNoGraphqlErrors(value);
+      return value;
+    },
     completedTarget,
   );
 }
@@ -181,79 +300,117 @@ function commentSummary(value: unknown): Record<string, unknown> {
 
 export function createServer(config: Config): McpServer {
   const server = new McpServer({ name: "onprem-gh-cli-mcp", version: "0.1.0" });
+  const accountSelectorSchema = z.string()
+    .trim()
+    .min(1)
+    .max(100)
+    .regex(/^[A-Za-z0-9_.-]+$/, "Account must be a configured GitHub account id.");
+  const accountInputSchema = config.accountProfiles.size === 1
+    ? accountSelectorSchema.optional()
+    : accountSelectorSchema;
+  const requestContextSchema = {
+    account: accountInputSchema,
+    hostname: z.string().trim().min(1).optional(),
+  };
+  const repositorySchema = {
+    ...requestContextSchema,
+    repository: z.string().describe("Repository in owner/name format"),
+  };
+  const writeContextSchema = repositorySchema;
+
+  server.registerTool("list_accounts", {
+    description: "List configured GitHub account selectors without exposing credentials or config paths.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true, destructiveHint: false },
+  }, async () => response({
+    accounts: [...config.accountProfiles.values()].map((profile) => ({
+      account: profile.id,
+      expectedLogin: profile.expectedLogin,
+      hostname: profile.hostname,
+      default: config.defaultAccountId === profile.id,
+    })),
+  }));
 
   server.registerTool("get_auth_status", {
-    description: "Check local GitHub CLI authentication without exposing any token.",
-    inputSchema: { hostname: z.string().default("github.com") },
+    description: "Check the selected isolated GitHub CLI account without exposing any token.",
+    inputSchema: requestContextSchema,
     annotations: { readOnlyHint: true, destructiveHint: false },
-  }, async ({ hostname }) => {
-    assertHostAllowed(hostname, config);
-    const normalizedHostname = hostname.trim().toLowerCase();
-    const profile = config.accountProfile?.hostname === normalizedHostname ? config.accountProfile : undefined;
+  }, async ({ account, hostname }) => {
+    const context = await verifiedRequestContext(config, account, hostname);
+    const activeLogin = context.profile.expectedLogin;
     const result = await runGh([
       "auth",
       "status",
       "--hostname",
-      normalizedHostname,
-    ], config, { allowFailure: true });
-    const identity = await runGh([
-      "api",
-      "user",
-      "--hostname",
-      normalizedHostname,
-      "--jq",
-      ".login",
-    ], config, { allowFailure: true });
-    const activeLogin = identity.exitCode === 0 ? loginFromUserApi(identity.stdout) : undefined;
+      context.profile.hostname,
+    ], config, context, { allowFailure: true });
     return response({
-      authenticated: result.exitCode === 0 && activeLogin !== undefined,
-      hostname: normalizedHostname,
-      ...(activeLogin === undefined ? {} : { activeLogin }),
-      ...(profile === undefined ? {} : {
-        expectedLogin: profile.expectedLogin,
-        matchesExpected: activeLogin === profile.expectedLogin,
-      }),
+      authenticated: result.exitCode === 0,
+      account: context.accountId,
+      hostname: context.profile.hostname,
+      activeLogin,
+      expectedLogin: context.profile.expectedLogin,
+      matchesExpected: true,
       details: result.stderr || result.stdout,
     });
   });
 
   server.registerTool("list_repositories", {
     description: "List repositories visible to the authenticated GitHub CLI account.",
-    inputSchema: { owner: z.string().optional(), limit: z.number().int().min(1).max(100).default(30) },
+    inputSchema: {
+      ...requestContextSchema,
+      owner: z.string().optional(),
+      limit: z.number().int().min(1).max(100).default(30),
+    },
     annotations: { readOnlyHint: true, destructiveHint: false },
-  }, async ({ owner, limit }) => {
-    if (!owner && hasResourceAllowlist(config)) {
+  }, async ({ account, hostname, owner, limit }) => {
+    const context = await verifiedRequestContext(config, account, hostname);
+    if (!owner && hasResourceAllowlist(context)) {
       throw new Error("owner is required when a resource allowlist is configured.");
     }
-    if (owner) assertRepositoryListOwnerAllowed(owner, config);
-    if (config.allowedRepositories.size > 0) {
+    if (owner) assertRepositoryListOwnerAllowed(owner, context);
+    if (context.profile.allowedRepositories.size > 0) {
       const normalizedOwner = owner?.trim().toLowerCase();
-      const repositories = [...config.allowedRepositories]
+      const repositories = [...context.profile.allowedRepositories]
         .filter((repository) => normalizedOwner === undefined || repository.split("/", 1)[0] === normalizedOwner)
         .slice(0, limit);
       return response(await Promise.all(repositories.map(async (repository) =>
-        jsonGh(["repo", "view", repository, "--json", "nameWithOwner,url,visibility,isPrivate,updatedAt"], config)
+        jsonGh([
+          "repo",
+          "view",
+          repository,
+          "--json",
+          "nameWithOwner,url,visibility,isPrivate,updatedAt",
+        ], config, context)
       )));
     }
     const args = ["repo", "list", ...(owner ? [owner] : []), "--limit", String(limit), "--json", "nameWithOwner,url,visibility,isPrivate,updatedAt"];
-    return response(await jsonGh(args, config));
+    return response(await jsonGh(args, config, context));
   });
 
   server.registerTool("list_organizations", {
     description: "List organizations visible to the authenticated GitHub CLI account, including private memberships allowed by its scopes.",
-    inputSchema: {},
+    inputSchema: requestContextSchema,
     annotations: { readOnlyHint: true, destructiveHint: false },
-  }, async () => {
-    const pages = await jsonGh(["api", "user/orgs", "--paginate", "--slurp"], config);
+  }, async ({ account, hostname }) => {
+    const context = await verifiedRequestContext(config, account, hostname);
+    const pages = await jsonGh([
+      "api",
+      "user/orgs",
+      "--hostname",
+      context.profile.hostname,
+      "--paginate",
+      "--slurp",
+    ], config, context);
     if (!Array.isArray(pages)) throw new Error("GitHub CLI returned an unexpected organizations response.");
-    const allowedOrganizationOwners = new Set(config.allowedOwners);
+    const allowedOrganizationOwners = new Set(context.profile.allowedOwners);
     if (allowedOrganizationOwners.size === 0) {
-      for (const repository of config.allowedRepositories) {
+      for (const repository of context.profile.allowedRepositories) {
         allowedOrganizationOwners.add(repository.split("/", 1)[0]);
       }
     }
     const organizations = pages.flatMap((page) => Array.isArray(page) ? page : []).filter((organization) => {
-      if (!hasResourceAllowlist(config)) return true;
+      if (!hasResourceAllowlist(context)) return true;
       if (!organization || typeof organization !== "object" || Array.isArray(organization)) return false;
       const login = (organization as Record<string, unknown>).login;
       return typeof login === "string" && allowedOrganizationOwners.has(login.toLowerCase());
@@ -264,11 +421,6 @@ export function createServer(config: Config): McpServer {
     return response(organizations);
   });
 
-  const repositorySchema = { repository: z.string().describe("Repository in owner/name format") };
-  const writeContextSchema = {
-    ...repositorySchema,
-    hostname: z.string().min(1).default("github.com"),
-  };
   const gitRefSchema = z.string().trim().min(1).max(255).refine(
     (value) => !/[\0\r\n]/.test(value),
     "Git reference must not contain control characters.",
@@ -294,10 +446,15 @@ export function createServer(config: Config): McpServer {
     description: "Read the current commit SHA for a branch in an allowed repository.",
     inputSchema: { ...writeContextSchema, branch: branchNameSchema },
     annotations: { readOnlyHint: true, destructiveHint: false },
-  }, async ({ repository, hostname, branch }) => {
-    assertHostAllowed(hostname, config); assertRepositoryAllowed(repository, config);
-    const normalizedHostname = hostname.trim().toLowerCase();
-    const value = await jsonGh(["api", `repos/${repository.trim()}/git/ref/heads/${encodeGitRef(branch.trim())}`, "--hostname", normalizedHostname], config);
+  }, async ({ account, repository, hostname, branch }) => {
+    const context = await verifiedRequestContext(config, account, hostname);
+    assertRepositoryAllowed(repository, context);
+    const value = await jsonGh([
+      "api",
+      `repos/${repository.trim()}/git/ref/heads/${encodeGitRef(branch.trim())}`,
+      "--hostname",
+      context.profile.hostname,
+    ], config, context);
     return response({ branch: branchSummary(value) });
   });
 
@@ -305,15 +462,29 @@ export function createServer(config: Config): McpServer {
     description: "Create a feature branch from an existing branch. Existing branches are never overwritten.",
     inputSchema: { ...writeContextSchema, branch: branchNameSchema, sourceBranch: branchNameSchema.default("main") },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-  }, async ({ repository, hostname, branch, sourceBranch }) => {
-    assertHostAllowed(hostname, config); assertRepositoryAllowed(repository, config); assertWritableBranch(branch);
-    const normalizedRepository = repository.trim(); const normalizedHostname = hostname.trim().toLowerCase();
-    const source = await jsonGh(["api", `repos/${normalizedRepository}/git/ref/heads/${encodeGitRef(sourceBranch.trim())}`, "--hostname", normalizedHostname], config);
+  }, async ({ account, repository, hostname, branch, sourceBranch }) => {
+    const normalizedRepository = repository.trim();
+    const request = await prepareWriteRequest({
+      tool: "create_branch",
+      repository: normalizedRepository,
+      branch: branch.trim(),
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(repository, context);
+    assertWritableBranch(branch);
+    const normalizedHostname = context.profile.hostname;
+    const source = await jsonGh([
+      "api",
+      `repos/${normalizedRepository}/git/ref/heads/${encodeGitRef(sourceBranch.trim())}`,
+      "--hostname",
+      normalizedHostname,
+    ], config, context);
     const sourceSha = branchHeadSha(source);
     const operation = await auditedJsonGh(
-      { tool: "create_branch", hostname: normalizedHostname, repository: normalizedRepository, branch: branch.trim() },
+      request,
       ["api", `repos/${normalizedRepository}/git/refs`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
-      { ref: `refs/heads/${branch.trim()}`, sha: sourceSha }, config,
+      { ref: `refs/heads/${branch.trim()}`, sha: sourceSha },
+      config,
     );
     return response({ branch: branchSummary(operation.value), audit: operation.audit });
   });
@@ -335,23 +506,30 @@ export function createServer(config: Config): McpServer {
       })).min(1).max(100),
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
-  }, async ({ repository, hostname, branch, expectedHeadSha, message, files }) => {
-    assertHostAllowed(hostname, config); assertRepositoryAllowed(repository, config); assertWritableBranch(branch);
+  }, async ({ account, repository, hostname, branch, expectedHeadSha, message, files }) => {
+    const normalizedRepository = repository.trim();
+    const request = await prepareWriteRequest({
+      tool: "commit_files",
+      repository: normalizedRepository,
+      branch: branch.trim(),
+      fileCount: files.length,
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(repository, context);
+    assertWritableBranch(branch);
     const paths = files.map((file) => file.path);
     if (new Set(paths).size !== paths.length) throw new Error("Each repository path may appear only once per commit.");
-    const normalizedRepository = repository.trim(); const normalizedHostname = hostname.trim().toLowerCase();
+    const normalizedHostname = context.profile.hostname;
     const operation = await auditedOperation(
-      {
-        tool: "commit_files",
-        hostname: normalizedHostname,
-        repository: normalizedRepository,
-        branch: branch.trim(),
-        fileCount: files.length,
-      },
+      request,
       config,
       async () => {
         const refPath = `repos/${normalizedRepository}/git/ref/heads/${encodeGitRef(branch.trim())}`;
-        const currentRef = await jsonGh(["api", refPath, "--hostname", normalizedHostname], config);
+        const currentRef = await jsonGh(
+          ["api", refPath, "--hostname", normalizedHostname],
+          config,
+          context,
+        );
         const actualHeadSha = branchHeadSha(currentRef);
         if (actualHeadSha !== expectedHeadSha) {
           throw new Error("Branch head changed. Fetch the branch again and rebuild the commit from the new head.");
@@ -359,6 +537,7 @@ export function createServer(config: Config): McpServer {
         const baseCommit = await jsonGh(
           ["api", `repos/${normalizedRepository}/git/commits/${actualHeadSha}`, "--hostname", normalizedHostname],
           config,
+          context,
         );
         const baseTree = commitTreeSha(baseCommit);
         const tree: Record<string, unknown>[] = [];
@@ -371,6 +550,7 @@ export function createServer(config: Config): McpServer {
           const blob = await jsonGh(
             ["api", `repos/${normalizedRepository}/git/blobs`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
             config,
+            context,
             { stdin: JSON.stringify({ content: file.content, encoding: "utf-8" }) },
           );
           tree.push({ path: file.path, mode: "100644", type: "blob", sha: gitObjectSha(blob, "Git blob") });
@@ -378,18 +558,22 @@ export function createServer(config: Config): McpServer {
         const newTree = await jsonGh(
           ["api", `repos/${normalizedRepository}/git/trees`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
           config,
+          context,
           { stdin: JSON.stringify({ base_tree: baseTree, tree }) },
         );
         const newTreeSha = gitObjectSha(newTree, "Git tree");
         const commit = await jsonGh(
           ["api", `repos/${normalizedRepository}/git/commits`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
           config,
+          context,
           { stdin: JSON.stringify({ message: message.trim(), tree: newTreeSha, parents: [actualHeadSha] }) },
         );
         const commitSha = gitObjectSha(commit, "Git commit");
+        await verifyAccountProfile(config, context);
         const branchValue = await jsonGh(
           ["api", `repos/${normalizedRepository}/git/refs/heads/${encodeGitRef(branch.trim())}`, "--hostname", normalizedHostname, "--method", "PATCH", "--input", "-"],
           config,
+          context,
           { stdin: JSON.stringify({ sha: commitSha, force: false }) },
         );
         return { branchValue, commitSha };
@@ -407,9 +591,10 @@ export function createServer(config: Config): McpServer {
     description: "List issues in an allowed repository.",
     inputSchema: { ...repositorySchema, state: z.enum(["open", "closed", "all"]).default("open"), limit: z.number().int().min(1).max(100).default(30) },
     annotations: { readOnlyHint: true, destructiveHint: false },
-  }, async ({ repository, state, limit }) => {
-    assertRepositoryAllowed(repository, config);
-    return response(await jsonGh(["issue", "list", "--repo", repository, "--state", state, "--limit", String(limit), "--json", "number,title,state,author,assignees,labels,createdAt,updatedAt,url"], config));
+  }, async ({ account, hostname, repository, state, limit }) => {
+    const context = await verifiedRequestContext(config, account, hostname);
+    assertRepositoryAllowed(repository, context);
+    return response(await jsonGh(["issue", "list", "--repo", repository, "--state", state, "--limit", String(limit), "--json", "number,title,state,author,assignees,labels,createdAt,updatedAt,url"], config, context));
   });
 
   server.registerTool("create_issue", {
@@ -420,14 +605,18 @@ export function createServer(config: Config): McpServer {
       body: z.string().max(65_536).optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-  }, async ({ repository, hostname, title, body }) => {
-    assertHostAllowed(hostname, config);
-    assertRepositoryAllowed(repository, config);
+  }, async ({ account, repository, hostname, title, body }) => {
     const normalizedRepository = repository.trim();
-    const normalizedHostname = hostname.trim().toLowerCase();
+    const request = await prepareWriteRequest({
+      tool: "create_issue",
+      repository: normalizedRepository,
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(repository, context);
+    const normalizedHostname = context.profile.hostname;
     const payload = body === undefined ? { title } : { title, body };
     const operation = await auditedJsonGh(
-      { tool: "create_issue", hostname: normalizedHostname, repository: normalizedRepository },
+      request,
       ["api", `repos/${normalizedRepository}/issues`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
       payload,
       config,
@@ -445,19 +634,24 @@ export function createServer(config: Config): McpServer {
       state: z.enum(["open", "closed"]).optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-  }, async ({ repository, hostname, issueNumber, title, body, state }) => {
-    assertHostAllowed(hostname, config);
-    assertRepositoryAllowed(repository, config);
+  }, async ({ account, repository, hostname, issueNumber, title, body, state }) => {
     const normalizedRepository = repository.trim();
-    const normalizedHostname = hostname.trim().toLowerCase();
+    const request = await prepareWriteRequest({
+      tool: "update_issue",
+      repository: normalizedRepository,
+      issueNumber,
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(repository, context);
+    const normalizedHostname = context.profile.hostname;
     const payload: Record<string, unknown> = {};
     if (title !== undefined) payload.title = title;
     if (body !== undefined) payload.body = body;
     if (state !== undefined) payload.state = state;
     if (Object.keys(payload).length === 0) throw new Error("At least one of title, body, or state must be provided.");
-    await assertStandaloneIssue(normalizedRepository, issueNumber, normalizedHostname, config);
+    await assertStandaloneIssue(normalizedRepository, issueNumber, config, context);
     const operation = await auditedJsonGh(
-      { tool: "update_issue", hostname: normalizedHostname, repository: normalizedRepository, issueNumber },
+      request,
       ["api", `repos/${normalizedRepository}/issues/${issueNumber}`, "--hostname", normalizedHostname, "--method", "PATCH", "--input", "-"],
       payload,
       config,
@@ -473,14 +667,19 @@ export function createServer(config: Config): McpServer {
       body: z.string().min(1).max(65_536),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-  }, async ({ repository, hostname, issueNumber, body }) => {
-    assertHostAllowed(hostname, config);
-    assertRepositoryAllowed(repository, config);
+  }, async ({ account, repository, hostname, issueNumber, body }) => {
     const normalizedRepository = repository.trim();
-    const normalizedHostname = hostname.trim().toLowerCase();
-    await assertStandaloneIssue(normalizedRepository, issueNumber, normalizedHostname, config);
+    const request = await prepareWriteRequest({
+      tool: "comment_issue",
+      repository: normalizedRepository,
+      issueNumber,
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(repository, context);
+    const normalizedHostname = context.profile.hostname;
+    await assertStandaloneIssue(normalizedRepository, issueNumber, config, context);
     const operation = await auditedJsonGh(
-      { tool: "comment_issue", hostname: normalizedHostname, repository: normalizedRepository, issueNumber },
+      request,
       ["api", `repos/${normalizedRepository}/issues/${issueNumber}/comments`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
       { body },
       config,
@@ -492,9 +691,10 @@ export function createServer(config: Config): McpServer {
     description: "List pull requests in an allowed repository.",
     inputSchema: { ...repositorySchema, state: z.enum(["open", "closed", "merged", "all"]).default("open"), limit: z.number().int().min(1).max(100).default(30) },
     annotations: { readOnlyHint: true, destructiveHint: false },
-  }, async ({ repository, state, limit }) => {
-    assertRepositoryAllowed(repository, config);
-    return response(await jsonGh(["pr", "list", "--repo", repository, "--state", state, "--limit", String(limit), "--json", "number,title,state,isDraft,author,headRefName,baseRefName,createdAt,updatedAt,url"], config));
+  }, async ({ account, hostname, repository, state, limit }) => {
+    const context = await verifiedRequestContext(config, account, hostname);
+    assertRepositoryAllowed(repository, context);
+    return response(await jsonGh(["pr", "list", "--repo", repository, "--state", state, "--limit", String(limit), "--json", "number,title,state,isDraft,author,headRefName,baseRefName,createdAt,updatedAt,url"], config, context));
   });
 
   server.registerTool("create_pull_request", {
@@ -509,11 +709,15 @@ export function createServer(config: Config): McpServer {
       maintainerCanModify: z.boolean().default(true),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-  }, async ({ repository, hostname, title, body, head, base, draft, maintainerCanModify }) => {
-    assertHostAllowed(hostname, config);
-    assertRepositoryAllowed(repository, config);
+  }, async ({ account, repository, hostname, title, body, head, base, draft, maintainerCanModify }) => {
     const normalizedRepository = repository.trim();
-    const normalizedHostname = hostname.trim().toLowerCase();
+    const request = await prepareWriteRequest({
+      tool: "create_pull_request",
+      repository: normalizedRepository,
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(repository, context);
+    const normalizedHostname = context.profile.hostname;
     const payload: Record<string, unknown> = {
       title,
       head: head.trim(),
@@ -523,7 +727,7 @@ export function createServer(config: Config): McpServer {
     };
     if (body !== undefined) payload.body = body;
     const operation = await auditedJsonGh(
-      { tool: "create_pull_request", hostname: normalizedHostname, repository: normalizedRepository },
+      request,
       ["api", `repos/${normalizedRepository}/pulls`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
       payload,
       config,
@@ -541,19 +745,24 @@ export function createServer(config: Config): McpServer {
       state: z.enum(["open", "closed"]).optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-  }, async ({ repository, hostname, pullRequestNumber, title, body, state }) => {
-    assertHostAllowed(hostname, config);
-    assertRepositoryAllowed(repository, config);
+  }, async ({ account, repository, hostname, pullRequestNumber, title, body, state }) => {
     const normalizedRepository = repository.trim();
-    const normalizedHostname = hostname.trim().toLowerCase();
+    const request = await prepareWriteRequest({
+      tool: "update_pull_request",
+      repository: normalizedRepository,
+      pullRequestNumber,
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(repository, context);
+    const normalizedHostname = context.profile.hostname;
     const payload: Record<string, unknown> = {};
     if (title !== undefined) payload.title = title;
     if (body !== undefined) payload.body = body;
     if (state !== undefined) payload.state = state;
     if (Object.keys(payload).length === 0) throw new Error("At least one of title, body, or state must be provided.");
-    await assertPullRequest(normalizedRepository, pullRequestNumber, normalizedHostname, config);
+    await assertPullRequest(normalizedRepository, pullRequestNumber, config, context);
     const operation = await auditedJsonGh(
-      { tool: "update_pull_request", hostname: normalizedHostname, repository: normalizedRepository, pullRequestNumber },
+      request,
       ["api", `repos/${normalizedRepository}/pulls/${pullRequestNumber}`, "--hostname", normalizedHostname, "--method", "PATCH", "--input", "-"],
       payload,
       config,
@@ -569,14 +778,19 @@ export function createServer(config: Config): McpServer {
       body: z.string().min(1).max(65_536),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-  }, async ({ repository, hostname, pullRequestNumber, body }) => {
-    assertHostAllowed(hostname, config);
-    assertRepositoryAllowed(repository, config);
+  }, async ({ account, repository, hostname, pullRequestNumber, body }) => {
     const normalizedRepository = repository.trim();
-    const normalizedHostname = hostname.trim().toLowerCase();
-    await assertPullRequest(normalizedRepository, pullRequestNumber, normalizedHostname, config);
+    const request = await prepareWriteRequest({
+      tool: "comment_pull_request",
+      repository: normalizedRepository,
+      pullRequestNumber,
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(repository, context);
+    const normalizedHostname = context.profile.hostname;
+    await assertPullRequest(normalizedRepository, pullRequestNumber, config, context);
     const operation = await auditedJsonGh(
-      { tool: "comment_pull_request", hostname: normalizedHostname, repository: normalizedRepository, pullRequestNumber },
+      request,
       ["api", `repos/${normalizedRepository}/issues/${pullRequestNumber}/comments`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
       { body },
       config,
@@ -593,17 +807,22 @@ export function createServer(config: Config): McpServer {
       body: z.string().max(65_536).optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-  }, async ({ repository, hostname, pullRequestNumber, event, body }) => {
-    assertHostAllowed(hostname, config);
-    assertRepositoryAllowed(repository, config);
-    assertReviewBody(event, body);
+  }, async ({ account, repository, hostname, pullRequestNumber, event, body }) => {
     const normalizedRepository = repository.trim();
-    const normalizedHostname = hostname.trim().toLowerCase();
-    await assertPullRequest(normalizedRepository, pullRequestNumber, normalizedHostname, config);
+    const request = await prepareWriteRequest({
+      tool: "review_pull_request",
+      repository: normalizedRepository,
+      pullRequestNumber,
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(repository, context);
+    assertReviewBody(event, body);
+    const normalizedHostname = context.profile.hostname;
+    await assertPullRequest(normalizedRepository, pullRequestNumber, config, context);
     const payload: Record<string, unknown> = { event };
     if (body !== undefined) payload.body = body;
     const operation = await auditedJsonGh(
-      { tool: "review_pull_request", hostname: normalizedHostname, repository: normalizedRepository, pullRequestNumber },
+      request,
       ["api", `repos/${normalizedRepository}/pulls/${pullRequestNumber}/reviews`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
       payload,
       config,
@@ -615,9 +834,10 @@ export function createServer(config: Config): McpServer {
     description: "List GitHub Actions workflow runs in an allowed repository.",
     inputSchema: { ...repositorySchema, limit: z.number().int().min(1).max(100).default(30) },
     annotations: { readOnlyHint: true, destructiveHint: false },
-  }, async ({ repository, limit }) => {
-    assertRepositoryAllowed(repository, config);
-    return response(await jsonGh(["run", "list", "--repo", repository, "--limit", String(limit), "--json", "databaseId,name,displayTitle,status,conclusion,event,headBranch,createdAt,updatedAt,url"], config));
+  }, async ({ account, hostname, repository, limit }) => {
+    const context = await verifiedRequestContext(config, account, hostname);
+    assertRepositoryAllowed(repository, context);
+    return response(await jsonGh(["run", "list", "--repo", repository, "--limit", String(limit), "--json", "databaseId,name,displayTitle,status,conclusion,event,headBranch,createdAt,updatedAt,url"], config, context));
   });
 
   server.registerTool("dispatch_workflow", {
@@ -629,19 +849,28 @@ export function createServer(config: Config): McpServer {
       inputs: z.record(z.string(), z.string()).optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
-  }, async ({ repository, hostname, workflow, ref, inputs }) => {
-    assertHostAllowed(hostname, config);
-    assertRepositoryAllowed(repository, config);
+  }, async ({ account, repository, hostname, workflow, ref, inputs }) => {
     const normalizedRepository = repository.trim();
-    const normalizedHostname = hostname.trim().toLowerCase();
     const normalizedWorkflow = workflow.trim();
+    const request = await prepareWriteRequest({
+      tool: "dispatch_workflow",
+      repository: normalizedRepository,
+      workflow: normalizedWorkflow,
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(repository, context);
+    const normalizedHostname = context.profile.hostname;
     const normalizedRef = ref.trim();
     const normalizedInputs = normalizeWorkflowInputs(inputs ?? {});
     const workflowPath = `repos/${normalizedRepository}/actions/workflows/${encodeURIComponent(normalizedWorkflow)}`;
-    const existing = await jsonGh(["api", workflowPath, "--hostname", normalizedHostname], config);
+    const existing = await jsonGh(
+      ["api", workflowPath, "--hostname", normalizedHostname],
+      config,
+      context,
+    );
     assertActiveWorkflow(existing, normalizedWorkflow);
     const operation = await auditedJsonGh(
-      { tool: "dispatch_workflow", hostname: normalizedHostname, repository: normalizedRepository, workflow: normalizedWorkflow },
+      request,
       ["api", `${workflowPath}/dispatches`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
       { ref: normalizedRef, inputs: normalizedInputs },
       config,
@@ -661,11 +890,15 @@ export function createServer(config: Config): McpServer {
       generateReleaseNotes: z.boolean().default(false),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-  }, async ({ repository, hostname, tagName, targetCommitish, name, body, prerelease, generateReleaseNotes }) => {
-    assertHostAllowed(hostname, config);
-    assertRepositoryAllowed(repository, config);
+  }, async ({ account, repository, hostname, tagName, targetCommitish, name, body, prerelease, generateReleaseNotes }) => {
     const normalizedRepository = repository.trim();
-    const normalizedHostname = hostname.trim().toLowerCase();
+    const request = await prepareWriteRequest({
+      tool: "create_release",
+      repository: normalizedRepository,
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(repository, context);
+    const normalizedHostname = context.profile.hostname;
     const payload: Record<string, unknown> = {
       tag_name: tagName.trim(),
       draft: true,
@@ -676,7 +909,7 @@ export function createServer(config: Config): McpServer {
     if (name !== undefined) payload.name = name;
     if (body !== undefined) payload.body = body;
     const operation = await auditedJsonGh(
-      { tool: "create_release", hostname: normalizedHostname, repository: normalizedRepository },
+      request,
       ["api", `repos/${normalizedRepository}/releases`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
       payload,
       config,
@@ -694,16 +927,21 @@ export function createServer(config: Config): McpServer {
       description: z.string().max(100).optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-  }, async ({ repository, hostname, name, color, description }) => {
-    assertHostAllowed(hostname, config);
-    assertRepositoryAllowed(repository, config);
+  }, async ({ account, repository, hostname, name, color, description }) => {
     const normalizedRepository = repository.trim();
-    const normalizedHostname = hostname.trim().toLowerCase();
     const normalizedName = name.trim();
+    const request = await prepareWriteRequest({
+      tool: "create_label",
+      repository: normalizedRepository,
+      label: normalizedName,
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(repository, context);
+    const normalizedHostname = context.profile.hostname;
     const payload: Record<string, unknown> = { name: normalizedName, color: color.toLowerCase() };
     if (description !== undefined) payload.description = description;
     const operation = await auditedJsonGh(
-      { tool: "create_label", hostname: normalizedHostname, repository: normalizedRepository, label: normalizedName },
+      request,
       ["api", `repos/${normalizedRepository}/labels`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
       payload,
       config,
@@ -721,21 +959,26 @@ export function createServer(config: Config): McpServer {
       description: z.string().max(100).optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-  }, async ({ repository, hostname, currentName, newName, color, description }) => {
-    assertHostAllowed(hostname, config);
-    assertRepositoryAllowed(repository, config);
+  }, async ({ account, repository, hostname, currentName, newName, color, description }) => {
     const normalizedRepository = repository.trim();
-    const normalizedHostname = hostname.trim().toLowerCase();
     const normalizedCurrentName = currentName.trim();
+    const request = await prepareWriteRequest({
+      tool: "update_label",
+      repository: normalizedRepository,
+      label: normalizedCurrentName,
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(repository, context);
+    const normalizedHostname = context.profile.hostname;
     const payload: Record<string, unknown> = {};
     if (newName !== undefined) payload.new_name = newName.trim();
     if (color !== undefined) payload.color = color.toLowerCase();
     if (description !== undefined) payload.description = description;
     if (Object.keys(payload).length === 0) throw new Error("At least one label field must be provided.");
     const labelPath = `repos/${normalizedRepository}/labels/${encodeURIComponent(normalizedCurrentName)}`;
-    await jsonGh(["api", labelPath, "--hostname", normalizedHostname], config);
+    await jsonGh(["api", labelPath, "--hostname", normalizedHostname], config, context);
     const operation = await auditedJsonGh(
-      { tool: "update_label", hostname: normalizedHostname, repository: normalizedRepository, label: normalizedCurrentName },
+      request,
       ["api", labelPath, "--hostname", normalizedHostname, "--method", "PATCH", "--input", "-"],
       payload,
       config,
@@ -752,16 +995,20 @@ export function createServer(config: Config): McpServer {
       dueOn: dueOnSchema.optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-  }, async ({ repository, hostname, title, description, dueOn }) => {
-    assertHostAllowed(hostname, config);
-    assertRepositoryAllowed(repository, config);
+  }, async ({ account, repository, hostname, title, description, dueOn }) => {
     const normalizedRepository = repository.trim();
-    const normalizedHostname = hostname.trim().toLowerCase();
+    const request = await prepareWriteRequest({
+      tool: "create_milestone",
+      repository: normalizedRepository,
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(repository, context);
+    const normalizedHostname = context.profile.hostname;
     const payload: Record<string, unknown> = { title: title.trim(), state: "open" };
     if (description !== undefined) payload.description = description;
     if (dueOn !== undefined) payload.due_on = dueOn;
     const operation = await auditedJsonGh(
-      { tool: "create_milestone", hostname: normalizedHostname, repository: normalizedRepository },
+      request,
       ["api", `repos/${normalizedRepository}/milestones`, "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
       payload,
       config,
@@ -781,11 +1028,16 @@ export function createServer(config: Config): McpServer {
       dueOn: dueOnSchema.nullable().optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-  }, async ({ repository, hostname, milestoneNumber, title, description, state, dueOn }) => {
-    assertHostAllowed(hostname, config);
-    assertRepositoryAllowed(repository, config);
+  }, async ({ account, repository, hostname, milestoneNumber, title, description, state, dueOn }) => {
     const normalizedRepository = repository.trim();
-    const normalizedHostname = hostname.trim().toLowerCase();
+    const request = await prepareWriteRequest({
+      tool: "update_milestone",
+      repository: normalizedRepository,
+      milestoneNumber,
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(repository, context);
+    const normalizedHostname = context.profile.hostname;
     const payload: Record<string, unknown> = {};
     if (title !== undefined) payload.title = title.trim();
     if (description !== undefined) payload.description = description;
@@ -793,9 +1045,9 @@ export function createServer(config: Config): McpServer {
     if (dueOn !== undefined) payload.due_on = dueOn;
     if (Object.keys(payload).length === 0) throw new Error("At least one milestone field must be provided.");
     const milestonePath = `repos/${normalizedRepository}/milestones/${milestoneNumber}`;
-    await jsonGh(["api", milestonePath, "--hostname", normalizedHostname], config);
+    await jsonGh(["api", milestonePath, "--hostname", normalizedHostname], config, context);
     const operation = await auditedJsonGh(
-      { tool: "update_milestone", hostname: normalizedHostname, repository: normalizedRepository, milestoneNumber },
+      request,
       ["api", milestonePath, "--hostname", normalizedHostname, "--method", "PATCH", "--input", "-"],
       payload,
       config,
@@ -806,27 +1058,35 @@ export function createServer(config: Config): McpServer {
   server.registerTool("create_project", {
     description: "Create a private GitHub Projects v2 project for an allowed user or organization. This tool cannot make the project public or delete it.",
     inputSchema: {
-      hostname: z.string().min(1).default("github.com"),
+      ...requestContextSchema,
       ownerType: z.enum(["user", "organization"]),
       owner: ownerLoginSchema,
       title: z.string().trim().min(1).max(256),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-  }, async ({ hostname, ownerType, owner, title }) => {
-    assertHostAllowed(hostname, config);
-    assertOwnerAllowed(owner, config);
-    const normalizedHostname = hostname.trim().toLowerCase();
+  }, async ({ account, hostname, ownerType, owner, title }) => {
     const normalizedOwner = owner.trim().toLowerCase();
+    const request = await prepareWriteRequest({
+      tool: "create_project",
+      owner: normalizedOwner,
+    }, config, account, hostname);
+    const { context } = request;
+    assertOwnerAllowed(owner, context);
+    const normalizedHostname = context.profile.hostname;
     const ownerEndpoint = ownerType === "organization" ? `orgs/${normalizedOwner}` : `users/${normalizedOwner}`;
-    const ownerResponse = await jsonGh(["api", ownerEndpoint, "--hostname", normalizedHostname], config);
+    const ownerResponse = await jsonGh(
+      ["api", ownerEndpoint, "--hostname", normalizedHostname],
+      config,
+      context,
+    );
     const ownerId = ownerNodeId(ownerResponse);
     const query = `mutation($ownerId: ID!, $title: String!) {
       createProjectV2(input: { ownerId: $ownerId, title: $title }) {
         projectV2 { id number title url closed public }
       }
     }`;
-    const operation = await auditedJsonGh(
-      { tool: "create_project", hostname: normalizedHostname, owner: normalizedOwner },
+    const operation = await auditedGraphqlGh(
+      request,
       ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
       { query, variables: { ownerId, title: title.trim() } },
       config,
@@ -839,7 +1099,7 @@ export function createServer(config: Config): McpServer {
   server.registerTool("update_project", {
     description: "Update a GitHub Projects v2 title, descriptions, or reversible open/closed state. This tool cannot change visibility or delete a project.",
     inputSchema: {
-      hostname: z.string().min(1).default("github.com"),
+      ...requestContextSchema,
       owner: ownerLoginSchema.describe("Allowed owner used as the authorization scope"),
       projectId: projectIdSchema,
       title: z.string().trim().min(1).max(256).optional(),
@@ -848,12 +1108,17 @@ export function createServer(config: Config): McpServer {
       closed: z.boolean().optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-  }, async ({ hostname, owner, projectId, title, shortDescription, readme, closed }) => {
-    assertHostAllowed(hostname, config);
-    assertOwnerAllowed(owner, config);
-    const normalizedHostname = hostname.trim().toLowerCase();
+  }, async ({ account, hostname, owner, projectId, title, shortDescription, readme, closed }) => {
     const normalizedOwner = owner.trim().toLowerCase();
     const normalizedProjectId = projectId.trim();
+    const request = await prepareWriteRequest({
+      tool: "update_project",
+      owner: normalizedOwner,
+      projectId: normalizedProjectId,
+    }, config, account, hostname);
+    const { context } = request;
+    assertOwnerAllowed(owner, context);
+    const normalizedHostname = context.profile.hostname;
     const update = buildUpdateProjectMutation(normalizedProjectId, {
       ...(title === undefined ? {} : { title: title.trim() }),
       ...(shortDescription === undefined ? {} : { shortDescription }),
@@ -867,12 +1132,13 @@ export function createServer(config: Config): McpServer {
     const existing = await jsonGh(
       ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
       config,
+      context,
       { stdin: JSON.stringify({ query: readQuery, variables: { projectId: normalizedProjectId } }) },
     );
     assertProjectOwner(existing, normalizedOwner);
 
-    const operation = await auditedJsonGh(
-      { tool: "update_project", hostname: normalizedHostname, owner: normalizedOwner, projectId: normalizedProjectId },
+    const operation = await auditedGraphqlGh(
+      request,
       ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
       update,
       config,
@@ -884,16 +1150,16 @@ export function createServer(config: Config): McpServer {
   server.registerTool("list_project_items", {
     description: "List Issue and Pull Request metadata in a GitHub Projects v2 project. Item field values and content bodies are not returned.",
     inputSchema: {
-      hostname: z.string().min(1).default("github.com"),
+      ...requestContextSchema,
       owner: ownerLoginSchema,
       projectId: projectIdSchema,
       limit: z.number().int().min(1).max(100).default(30),
     },
     annotations: { readOnlyHint: true, destructiveHint: false },
-  }, async ({ hostname, owner, projectId, limit }) => {
-    assertHostAllowed(hostname, config);
-    assertOwnerAllowed(owner, config);
-    const normalizedHostname = hostname.trim().toLowerCase();
+  }, async ({ account, hostname, owner, projectId, limit }) => {
+    const context = await verifiedRequestContext(config, account, hostname);
+    assertOwnerAllowed(owner, context);
+    const normalizedHostname = context.profile.hostname;
     const query = `query($projectId: ID!, $limit: Int!) {
       node(id: $projectId) { __typename ... on ProjectV2 {
         id owner { ... on User { login } ... on Organization { login } } items(first: $limit) { totalCount nodes { id isArchived content {
@@ -905,6 +1171,7 @@ export function createServer(config: Config): McpServer {
     const value = await jsonGh(
       ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
       config,
+      context,
       { stdin: JSON.stringify({ query, variables: { projectId: projectId.trim(), limit } }) },
     );
     assertProjectOwner(value, owner);
@@ -914,16 +1181,16 @@ export function createServer(config: Config): McpServer {
   server.registerTool("list_project_fields", {
     description: "List field metadata and selectable option IDs for a GitHub Projects v2 project. Item field values are not returned.",
     inputSchema: {
-      hostname: z.string().min(1).default("github.com"),
+      ...requestContextSchema,
       owner: ownerLoginSchema,
       projectId: projectIdSchema,
       limit: z.number().int().min(1).max(100).default(50),
     },
     annotations: { readOnlyHint: true, destructiveHint: false },
-  }, async ({ hostname, owner, projectId, limit }) => {
-    assertHostAllowed(hostname, config);
-    assertOwnerAllowed(owner, config);
-    const normalizedHostname = hostname.trim().toLowerCase();
+  }, async ({ account, hostname, owner, projectId, limit }) => {
+    const context = await verifiedRequestContext(config, account, hostname);
+    assertOwnerAllowed(owner, context);
+    const normalizedHostname = context.profile.hostname;
     const query = `query($projectId: ID!, $limit: Int!) {
       node(id: $projectId) { __typename ... on ProjectV2 {
         id owner { ... on User { login } ... on Organization { login } } fields(first: $limit) { totalCount nodes {
@@ -936,6 +1203,7 @@ export function createServer(config: Config): McpServer {
     const value = await jsonGh(
       ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
       config,
+      context,
       { stdin: JSON.stringify({ query, variables: { projectId: projectId.trim(), limit } }) },
     );
     assertProjectOwner(value, owner);
@@ -952,15 +1220,30 @@ export function createServer(config: Config): McpServer {
       number: z.number().int().positive(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-  }, async ({ repository, hostname, owner, projectId, contentType, number }) => {
-    assertHostAllowed(hostname, config);
-    assertRepositoryAllowed(repository, config);
-    assertOwnerAllowed(owner, config);
+  }, async ({ account, repository, hostname, owner, projectId, contentType, number }) => {
     const normalizedRepository = repository.trim();
-    const normalizedHostname = hostname.trim().toLowerCase();
-    await assertProjectAccess(projectId.trim(), owner, normalizedHostname, config);
+    const normalizedOwner = owner.trim().toLowerCase();
+    const normalizedProjectId = projectId.trim();
+    const request = await prepareWriteRequest({
+      tool: "add_project_item",
+      repository: normalizedRepository,
+      owner: normalizedOwner,
+      projectId: normalizedProjectId,
+      ...(contentType === "issue"
+        ? { issueNumber: number }
+        : { pullRequestNumber: number }),
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(repository, context);
+    assertOwnerAllowed(owner, context);
+    const normalizedHostname = context.profile.hostname;
+    await assertProjectAccess(normalizedProjectId, owner, config, context);
     const path = contentType === "issue" ? `repos/${normalizedRepository}/issues/${number}` : `repos/${normalizedRepository}/pulls/${number}`;
-    const content = await jsonGh(["api", path, "--hostname", normalizedHostname], config);
+    const content = await jsonGh(
+      ["api", path, "--hostname", normalizedHostname],
+      config,
+      context,
+    );
     if (!content || typeof content !== "object" || Array.isArray(content)) throw new Error("GitHub API returned an unexpected content response.");
     const contentRecord = content as Record<string, unknown>;
     if (contentType === "issue" && contentRecord.pull_request !== undefined) throw new Error(`Issue #${number} is a pull request.`);
@@ -968,8 +1251,8 @@ export function createServer(config: Config): McpServer {
     const query = `mutation($projectId: ID!, $contentId: ID!) {
       addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) { item { id isArchived } }
     }`;
-    const operation = await auditedJsonGh(
-      { tool: "add_project_item", hostname: normalizedHostname, repository: normalizedRepository, owner: owner.trim().toLowerCase(), projectId: projectId.trim(), ...(contentType === "issue" ? { issueNumber: number } : { pullRequestNumber: number }) },
+    const operation = await auditedGraphqlGh(
+      request,
       ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
       { query, variables: { projectId: projectId.trim(), contentId: contentRecord.node_id } },
       config,
@@ -981,57 +1264,90 @@ export function createServer(config: Config): McpServer {
   server.registerTool("set_project_item_field", {
     description: "Set one supported text, number, date, single-select, or iteration value on a GitHub Projects v2 item.",
     inputSchema: {
-      hostname: z.string().min(1).default("github.com"), owner: ownerLoginSchema,
+      ...requestContextSchema, owner: ownerLoginSchema,
       projectId: projectIdSchema, itemId: projectItemIdSchema, fieldId: projectFieldIdSchema,
       valueType: z.enum(["text", "number", "date", "singleSelect", "iteration"]),
       value: z.union([z.string().max(65_536), z.number().finite()]),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-  }, async ({ hostname, owner, projectId, itemId, fieldId, valueType, value }) => {
-    assertHostAllowed(hostname, config); assertOwnerAllowed(owner, config);
-    const normalizedHostname = hostname.trim().toLowerCase();
-    await assertProjectAccess(projectId.trim(), owner, normalizedHostname, config);
+  }, async ({ account, hostname, owner, projectId, itemId, fieldId, valueType, value }) => {
+    const normalizedOwner = owner.trim().toLowerCase();
+    const normalizedProjectId = projectId.trim();
+    const normalizedItemId = itemId.trim();
+    const normalizedFieldId = fieldId.trim();
+    const request = await prepareWriteRequest({
+      tool: "set_project_item_field",
+      owner: normalizedOwner,
+      projectId: normalizedProjectId,
+      projectItemId: normalizedItemId,
+      projectFieldId: normalizedFieldId,
+    }, config, account, hostname);
+    const { context } = request;
+    assertOwnerAllowed(owner, context);
+    const normalizedHostname = context.profile.hostname;
+    await assertProjectAccess(normalizedProjectId, owner, config, context);
     const query = `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: ProjectV2FieldValue!) {
       updateProjectV2ItemFieldValue(input: { projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: $value }) { projectV2Item { id isArchived } }
     }`;
-    const operation = await auditedJsonGh(
-      { tool: "set_project_item_field", hostname: normalizedHostname, owner: owner.trim().toLowerCase(), projectId: projectId.trim(), projectItemId: itemId.trim(), projectFieldId: fieldId.trim() },
+    const operation = await auditedGraphqlGh(
+      request,
       ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
-      { query, variables: { projectId: projectId.trim(), itemId: itemId.trim(), fieldId: fieldId.trim(), value: projectFieldValue(valueType, value) } }, config,
+      { query, variables: { projectId: normalizedProjectId, itemId: normalizedItemId, fieldId: normalizedFieldId, value: projectFieldValue(valueType, value) } }, config,
     );
     return response({ item: projectItemSummary(graphqlProjectItem(operation.value, "updateProjectV2ItemFieldValue")), audit: operation.audit });
   });
 
   server.registerTool("clear_project_item_field", {
     description: "Clear one supported field value on a GitHub Projects v2 item.",
-    inputSchema: { hostname: z.string().min(1).default("github.com"), owner: ownerLoginSchema, projectId: projectIdSchema, itemId: projectItemIdSchema, fieldId: projectFieldIdSchema },
+    inputSchema: { ...requestContextSchema, owner: ownerLoginSchema, projectId: projectIdSchema, itemId: projectItemIdSchema, fieldId: projectFieldIdSchema },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-  }, async ({ hostname, owner, projectId, itemId, fieldId }) => {
-    assertHostAllowed(hostname, config); assertOwnerAllowed(owner, config);
-    const normalizedHostname = hostname.trim().toLowerCase();
-    await assertProjectAccess(projectId.trim(), owner, normalizedHostname, config);
+  }, async ({ account, hostname, owner, projectId, itemId, fieldId }) => {
+    const normalizedOwner = owner.trim().toLowerCase();
+    const normalizedProjectId = projectId.trim();
+    const normalizedItemId = itemId.trim();
+    const normalizedFieldId = fieldId.trim();
+    const request = await prepareWriteRequest({
+      tool: "clear_project_item_field",
+      owner: normalizedOwner,
+      projectId: normalizedProjectId,
+      projectItemId: normalizedItemId,
+      projectFieldId: normalizedFieldId,
+    }, config, account, hostname);
+    const { context } = request;
+    assertOwnerAllowed(owner, context);
+    const normalizedHostname = context.profile.hostname;
+    await assertProjectAccess(normalizedProjectId, owner, config, context);
     const query = `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) {
       clearProjectV2ItemFieldValue(input: { projectId: $projectId, itemId: $itemId, fieldId: $fieldId }) { projectV2Item { id isArchived } }
     }`;
-    const target = { hostname: normalizedHostname, owner: owner.trim().toLowerCase(), projectId: projectId.trim(), projectItemId: itemId.trim(), projectFieldId: fieldId.trim() };
-    const operation = await auditedJsonGh({ tool: "clear_project_item_field", ...target }, ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"], { query, variables: { projectId: projectId.trim(), itemId: itemId.trim(), fieldId: fieldId.trim() } }, config);
+    const operation = await auditedGraphqlGh(request, ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"], { query, variables: { projectId: normalizedProjectId, itemId: normalizedItemId, fieldId: normalizedFieldId } }, config);
     return response({ item: projectItemSummary(graphqlProjectItem(operation.value, "clearProjectV2ItemFieldValue")), audit: operation.audit });
   });
 
   server.registerTool("set_project_item_archived", {
     description: "Archive or restore a GitHub Projects v2 item. This is reversible and does not delete its Issue or Pull Request.",
-    inputSchema: { hostname: z.string().min(1).default("github.com"), owner: ownerLoginSchema, projectId: projectIdSchema, itemId: projectItemIdSchema, archived: z.boolean() },
+    inputSchema: { ...requestContextSchema, owner: ownerLoginSchema, projectId: projectIdSchema, itemId: projectItemIdSchema, archived: z.boolean() },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-  }, async ({ hostname, owner, projectId, itemId, archived }) => {
-    assertHostAllowed(hostname, config); assertOwnerAllowed(owner, config);
-    const normalizedHostname = hostname.trim().toLowerCase();
-    await assertProjectAccess(projectId.trim(), owner, normalizedHostname, config);
+  }, async ({ account, hostname, owner, projectId, itemId, archived }) => {
+    const normalizedOwner = owner.trim().toLowerCase();
+    const normalizedProjectId = projectId.trim();
+    const normalizedItemId = itemId.trim();
+    const request = await prepareWriteRequest({
+      tool: "set_project_item_archived",
+      owner: normalizedOwner,
+      projectId: normalizedProjectId,
+      projectItemId: normalizedItemId,
+    }, config, account, hostname);
+    const { context } = request;
+    assertOwnerAllowed(owner, context);
+    const normalizedHostname = context.profile.hostname;
+    await assertProjectAccess(normalizedProjectId, owner, config, context);
     const operationName = archived ? "archiveProjectV2Item" : "unarchiveProjectV2Item";
     const query = `mutation($projectId: ID!, $itemId: ID!) { ${operationName}(input: { projectId: $projectId, itemId: $itemId }) { item { id isArchived } } }`;
-    const operation = await auditedJsonGh(
-      { tool: "set_project_item_archived", hostname: normalizedHostname, owner: owner.trim().toLowerCase(), projectId: projectId.trim(), projectItemId: itemId.trim() },
+    const operation = await auditedGraphqlGh(
+      request,
       ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
-      { query, variables: { projectId: projectId.trim(), itemId: itemId.trim() } }, config,
+      { query, variables: { projectId: normalizedProjectId, itemId: normalizedItemId } }, config,
     );
     return response({ item: projectItemSummary(graphqlProjectItem(operation.value, operationName)), audit: operation.audit });
   });
@@ -1048,11 +1364,16 @@ export function createServer(config: Config): McpServer {
       prerelease: z.boolean().optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-  }, async ({ repository, hostname, releaseId, tagName, targetCommitish, name, body, prerelease }) => {
-    assertHostAllowed(hostname, config);
-    assertRepositoryAllowed(repository, config);
+  }, async ({ account, repository, hostname, releaseId, tagName, targetCommitish, name, body, prerelease }) => {
     const normalizedRepository = repository.trim();
-    const normalizedHostname = hostname.trim().toLowerCase();
+    const request = await prepareWriteRequest({
+      tool: "update_release",
+      repository: normalizedRepository,
+      releaseId,
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(repository, context);
+    const normalizedHostname = context.profile.hostname;
     const payload: Record<string, unknown> = {};
     if (tagName !== undefined) payload.tag_name = tagName.trim();
     if (targetCommitish !== undefined) payload.target_commitish = targetCommitish.trim();
@@ -1065,10 +1386,11 @@ export function createServer(config: Config): McpServer {
     const existing = await jsonGh(
       ["api", `repos/${normalizedRepository}/releases/${releaseId}`, "--hostname", normalizedHostname],
       config,
+      context,
     );
     assertDraftRelease(existing, releaseId);
     const operation = await auditedJsonGh(
-      { tool: "update_release", hostname: normalizedHostname, repository: normalizedRepository, releaseId },
+      request,
       ["api", `repos/${normalizedRepository}/releases/${releaseId}`, "--hostname", normalizedHostname, "--method", "PATCH", "--input", "-"],
       payload,
       config,
@@ -1078,12 +1400,16 @@ export function createServer(config: Config): McpServer {
 
   server.registerTool("run_gh", {
     description: "Run an allowlisted, read-only GitHub CLI command. With a resource allowlist, only auth status is available; use typed repository tools for other reads.",
-    inputSchema: { args: z.array(z.string().min(1)).min(1).max(40) },
+    inputSchema: {
+      ...requestContextSchema,
+      args: z.array(z.string().min(1)).min(1).max(40),
+    },
     annotations: { readOnlyHint: true, destructiveHint: false },
-  }, async ({ args }) => {
+  }, async ({ account, hostname, args }) => {
+    const context = await verifiedRequestContext(config, account, hostname);
     assertSafeGhArguments(args);
-    assertRunGhAllowedByResourceScope(args, config);
-    const result = await runGh(args, config);
+    assertRunGhAllowedByResourceScope(args, context);
+    const result = await runGh(args, config, context);
     return response(result);
   });
   return server;
