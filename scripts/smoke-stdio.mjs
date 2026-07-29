@@ -13,6 +13,9 @@ const expectedTools = [
   "list_organizations",
   "list_repositories",
   "list_issues",
+  "get_issue",
+  "list_issue_comments",
+  "list_issue_events",
   "create_issue",
   "update_issue",
   "comment_issue",
@@ -26,6 +29,8 @@ const expectedTools = [
   "comment_pull_request",
   "review_pull_request",
   "list_workflow_runs",
+  "list_workflow_run_jobs",
+  "get_workflow_job_log",
   "dispatch_workflow",
   "create_release",
   "update_release",
@@ -137,10 +142,15 @@ try {
     throw new Error("run_gh must remain read-only.");
   }
   for (const name of [
+    "get_issue",
+    "list_issue_comments",
+    "list_issue_events",
     "get_pull_request",
     "list_pull_request_files",
     "get_pull_request_diff",
     "list_pull_request_checks",
+    "list_workflow_run_jobs",
+    "get_workflow_job_log",
   ]) {
     const annotations = tools.get(name)?.annotations;
     if (annotations?.readOnlyHint !== true || annotations?.destructiveHint !== false) {
