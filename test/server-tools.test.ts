@@ -77,6 +77,11 @@ describe("MCP tool registration", () => {
       expect(tools.has("delete_project_item")).toBe(false);
       expect(tools.has("create_project_field")).toBe(false);
       expect(tools.get("get_branch")?.annotations?.readOnlyHint).toBe(true);
+      for (const name of ["list_repository_tree", "get_repository_file"]) {
+        expect(tools.has(name)).toBe(true);
+        expect(tools.get(name)?.annotations?.readOnlyHint).toBe(true);
+        expect(tools.get(name)?.annotations?.destructiveHint).toBe(false);
+      }
       for (const name of ["create_branch", "commit_files"]) {
         expect(tools.has(name)).toBe(true);
         expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
