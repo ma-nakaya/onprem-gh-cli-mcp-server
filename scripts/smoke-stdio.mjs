@@ -8,6 +8,8 @@ const expectedTools = [
   "list_accounts",
   "get_auth_status",
   "get_branch",
+  "list_repository_tree",
+  "get_repository_file",
   "create_branch",
   "commit_files",
   "list_organizations",
@@ -143,6 +145,8 @@ try {
   }
   for (const name of [
     "get_issue",
+    "list_repository_tree",
+    "get_repository_file",
     "list_issue_comments",
     "list_issue_events",
     "get_pull_request",

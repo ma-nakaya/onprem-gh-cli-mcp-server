@@ -257,7 +257,7 @@ Confirm that:
 - Omitting `account` is rejected while more than one account is configured.
 - An Owner or Repository outside the selected account's allowlist is rejected.
 - The returned and audited account matches the requested account.
-- No GitHub token or secret appears in responses, process arguments, or logs.
+- No MCP/Tunnel runtime secret or GitHub CLI authentication token appears in responses, process arguments, or logs. `get_repository_file` intentionally returns exact committed Repository bytes, so never commit credentials and keep each account allowlist minimal.
 - One tunnel admin UI shows requests for both accounts.
 - One audit log records the selected account for each operation.
 
