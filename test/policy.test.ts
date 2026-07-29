@@ -83,9 +83,11 @@ describe("read-only policy", () => {
     expect(() => assertRunGhAllowedByResourceScope(["auth", "status", "-helsewhere.example"], context)).toThrow(/short hostname/i);
     expect(() => assertRunGhAllowedByResourceScope(["auth", "status", "-h=elsewhere.example"], context)).toThrow(/short hostname/i);
     expect(() => assertRunGhAllowedByResourceScope(["repo", "view", "ma-nakaya/example"], context)).toThrow(/typed repository tool/);
+    expect(() => assertRunGhAllowedByResourceScope(["issue", "view", "1", "--repo", "ma-nakaya/example"], context)).toThrow(/typed repository tool/);
     expect(() => assertRunGhAllowedByResourceScope(["pr", "view", "1", "--repo", "ma-nakaya/example"], context)).toThrow(/typed repository tool/);
     expect(() => assertRunGhAllowedByResourceScope(["pr", "diff", "1", "--repo", "ma-nakaya/example"], context)).toThrow(/typed repository tool/);
     expect(() => assertRunGhAllowedByResourceScope(["pr", "checks", "1", "--repo", "ma-nakaya/example"], context)).toThrow(/typed repository tool/);
+    expect(() => assertRunGhAllowedByResourceScope(["run", "view", "1", "--log"], context)).toThrow(/typed repository tool/);
 
     const unrestricted = contextFor("ma-nakaya", {
       allowedOwners: new Set<string>(),
