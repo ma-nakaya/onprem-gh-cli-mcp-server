@@ -17,6 +17,10 @@ const expectedTools = [
   "update_issue",
   "comment_issue",
   "list_pull_requests",
+  "get_pull_request",
+  "list_pull_request_files",
+  "get_pull_request_diff",
+  "list_pull_request_checks",
   "create_pull_request",
   "update_pull_request",
   "comment_pull_request",
@@ -131,6 +135,17 @@ try {
   }
   if (tools.get("run_gh")?.annotations?.readOnlyHint !== true) {
     throw new Error("run_gh must remain read-only.");
+  }
+  for (const name of [
+    "get_pull_request",
+    "list_pull_request_files",
+    "get_pull_request_diff",
+    "list_pull_request_checks",
+  ]) {
+    const annotations = tools.get(name)?.annotations;
+    if (annotations?.readOnlyHint !== true || annotations?.destructiveHint !== false) {
+      throw new Error(`${name} must be read-only and non-destructive.`);
+    }
   }
   if (tools.get("dispatch_workflow")?.annotations?.destructiveHint !== true) {
     throw new Error("dispatch_workflow must retain its high-impact hint.");
