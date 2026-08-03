@@ -3,9 +3,18 @@
 オンプレPCにインストールされたGitHub CLI (`gh`)を、MCPクライアントから安全に利用するためのstdio MCPサーバーです。APIの認証情報をMCPクライアントへ渡さず、ローカルの`gh auth`認証を利用します。
 
 > [!IMPORTANT]
-> 現在はPhase 3aです。読み取り操作と型付き書き込みに加え、1つのMCPプロセスから複数のGitHub CLI認証を明示的に選択できます。Repository削除、PRマージ、公開状態変更、Secret変更などの高影響な管理操作は未実装です。
+> 現在はPhase 3bです。読み取り操作、レビュー会話、型付き書き込み、確認付きRepository管理、PRマージに加え、1つのMCPプロセスから複数のGitHub CLI認証を明示的に選択できます。Secret変更、既存Repositoryの公開状態変更、Release公開などは未実装です。
 
 ## 提供ツール
+
+今回追加した不足機能は次の優先度で固定しています。
+
+| 優先度 | 対象 | 完了条件 |
+| --- | --- | --- |
+| P0 | PRレビュー会話・PRマージ | 通常／インライン本文、thread pagination、返信・編集・確認付き削除・resolve/unresolve、head SHA固定マージ |
+| P1 | Repository管理・Label割り当て | private既定作成、詳細取得、説明更新、二重確認削除、Repository／Issue／PR Label一覧・追加・削除 |
+
+GitHubの全管理APIを汎用実行できるようにはせず、上記領域を型付きツールとして完結させています。`run_gh`は引き続き読み取り専用です。
 
 ### 読み取り
 
@@ -13,6 +22,7 @@
 - `get_auth_status`: アカウントを選び、トークンを表示せず期待loginと実loginの一致を確認
 - `list_organizations`: 認証ユーザーから見える、許可Ownerに限定した所属Organization一覧
 - `list_repositories`: Repository一覧（許可リスト設定時はOwner指定必須）
+- `get_repository`: stable Repository ID、説明、visibilityなどのRepositoryメタデータを取得
 - `list_repository_tree`: branch / tag / commitのコミット済みツリーを、任意ディレクトリからページ取得
 - `get_repository_file`: コミット済みの任意ファイルをUTF-8またはBase64のbyte chunkで取得
 - `list_issues`: Issue一覧
@@ -24,6 +34,10 @@
 - `list_pull_request_files`: 変更ファイルのメタデータを`page` / `perPage`（最大100件、GitHub上限3,000ファイル）でページ取得
 - `get_pull_request_diff`: Diffを`offsetBytes` / `limitBytes`でUTF-8境界を保って分割取得し、続きの`nextOffsetBytes`を返却
 - `list_pull_request_checks`: Checksを`requiredOnly`で絞り込み、`offset` / `limit`でページ取得
+- `list_pull_request_reviews`: 通常レビュー本文を`page` / `perPage`で取得
+- `list_pull_request_review_comments` / `get_pull_request_review_comment`: インラインレビュー本文と返信元IDを一覧・個別取得
+- `list_pull_request_review_threads` / `get_pull_request_review_thread`: resolve状態・権限・thread IDと全コメントをGraphQL cursorでページ取得
+- `list_labels` / `list_issue_labels`: Repository定義Label、IssueまたはPull Requestへ割り当て済みのLabelを取得
 - `list_workflow_runs`: GitHub Actions実行一覧
 - `list_workflow_run_jobs`: Workflow RunのJobメタデータとJob IDを`page` / `perPage`でページ取得
 - `get_workflow_job_log`: JobとRunの所属を検証してから、失敗StepまたはJob全体のログをUTF-8 byte単位で分割取得
@@ -53,8 +67,22 @@ Issue本文とコメントはコマンドライン引数へ載せず、`gh api -
 - `update_pull_request`: タイトル、本文、open/closed状態を更新
 - `comment_pull_request`: Conversationへコメントを追加
 - `review_pull_request`: Approve、Request changes、Commentレビューを送信
+- `create_pull_request_review_comment`: `expectedHeadSha`で固定したDiffへline / file単位のインラインコメントを追加
+- `reply_pull_request_review_comment`: 対象PR所属を検証したtop-levelインラインコメントへ返信
+- `update_pull_request_review_comment`: `expectedUpdatedAt`一致時だけインライン本文を編集
+- `delete_pull_request_review_comment`: node IDと`expectedUpdatedAt`の二重確認後にインラインコメントを完全削除
+- `resolve_pull_request_review_thread` / `unresolve_pull_request_review_thread`: thread所属・現在状態・viewer権限を検証してresolve状態を変更
+- `merge_pull_request`: `expectedHeadSha`一致時だけ、明示した`merge` / `squash` / `rebase`方式でマージ
 
-Pull Requestのタイトル、本文、コメント、レビュー本文も標準入力で渡し、監査ログへ保存しません。これらのツールはPull Requestをマージできません。
+Pull Requestのタイトル、本文、コメント、レビュー本文、GraphQL mutationは標準入力で渡し、監査ログへ保存しません。Thread IDやReview Comment IDは対象Repository / PRとの所属を事前検証します。マージは現在のhead SHAが入力値と完全一致しない限り拒否し、`destructiveHint: true`で公開します。
+
+### Repository管理
+
+- `create_repository`: 明示的に許可されたUser / Organization配下へRepositoryを作成（既定visibilityは`private`）
+- `update_repository_description`: `get_repository`が返したstable Repository ID一致時だけ説明を更新・消去
+- `delete_repository`: stable Repository IDとcanonical `owner/name`の二重確認後に完全削除
+
+Owner-wideな作成には`allowedOwners`への明示設定が必要です。Repository説明は標準入力で渡し、監査ログへ保存しません。`create_repository`と`delete_repository`は`destructiveHint: true`です。削除はこのMCPから取り消せません。既存Repositoryのrename、visibility変更、archive、transferは提供しません。
 
 ### Draft Release書き込み
 
@@ -72,6 +100,7 @@ Release本文は標準入力で渡し、監査ログへ保存しません。公�
 ### Label / Milestone書き込み
 
 - `create_label` / `update_label`: Labelの作成、名前・色・説明の更新
+- `add_issue_labels` / `remove_issue_label`: IssueまたはPull Requestの既存Labelを追加・1件削除
 - `create_milestone` / `update_milestone`: Milestoneの作成、タイトル・説明・状態・期日の更新
 
 説明などの入力は標準入力で渡し、監査ログへ保存しません。更新前に対象の存在を確認します。Label色は6桁16進数、Milestone期日はUTC ISO 8601に限定します。削除操作は提供しません。
@@ -264,6 +293,7 @@ New-Item -ItemType Directory -Force $auditDir | Out-Null
 - 書き込み操作は入力スキーマを持つ専用ツールだけに限定
 - Issue本文とコメントは標準入力で渡し、プロセス引数へ載せない
 - Pull Requestのタイトル、本文、コメント、レビュー本文も標準入力で渡す
+- Repository説明、Repository作成設定、Label割り当ても標準入力で渡す
 - Release名、本文、タグ名も標準入力で渡す
 - Workflow Dispatchのrefとinputsも標準入力で渡す
 - Label / Milestoneの名前、説明、状態、期日も標準入力で渡す
@@ -275,8 +305,9 @@ New-Item -ItemType Directory -Force $auditDir | Out-Null
 - GitHub CLIの通常出力に現れたGitHub Tokenらしい文字列をマスク（byte正確性が必要な`get_repository_file`のRepository本文を除く）
 - 実行時間と出力量を制限
 - Repository/Owner/Hostの許可リストに対応
-- 監査ログへIssue・Pull Request・Releaseの本文やコメント、Workflow inputs、Label / Milestoneの説明、Projectのタイトル・説明・README、Token、Secretを保存しない
-- Pull Requestマージ機能を提供しない
+- 監査ログへIssue・Pull Request・Releaseの本文やコメント、Repository説明、Workflow inputs、Label / Milestoneの説明、Projectのタイトル・説明・README、Token、Secretを保存しない
+- PRマージはcanonical Repository、PR番号、open状態、現在head SHAを検証し、merge方式を必須にする
+- Repository削除はcanonical Repository、stable Repository ID、確認用`owner/name`を検証する
 - Release公開・削除・Asset操作を提供しない
 - Workflow再実行・キャンセル・Run削除を提供しない
 - Label / Milestone削除を提供しない
@@ -292,8 +323,9 @@ New-Item -ItemType Directory -Force $auditDir | Out-Null
 - Phase 2e: Label・Milestone作成・更新
 - Phase 2f: GitHub Projects v2作成・更新、Item/Field一覧、既存Issue/PR追加、Field値設定・消去、Item archive/restore
 - Phase 3a: 単一MCPプロセスによる複数GitHub CLIアカウント選択、監査account、認証分離
+- Phase 3b: PRレビューthread／インライン会話、SHA固定PRマージ、Repository作成・説明更新・確認付き削除、Issue/PR Label割り当て
 - Phase 4a: ChatGPT / Secure MCP Tunnel疎通手順とstdioスモークテスト
-- 未実装: Release公開、Project/Item削除、Project Field定義変更、Draft Item、PRマージ、Secret、二段階承認
+- 未実装: Release公開、Project/Item削除、Project Field定義変更、Draft Item、Secret、既存Repositoryのrename・visibility変更・transfer、外部承認システムによる二段階承認
 
 ## 開発
 

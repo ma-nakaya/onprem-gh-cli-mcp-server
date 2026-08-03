@@ -107,6 +107,35 @@ describe("audit log", () => {
     expect(text).not.toContain("review content");
   });
 
+  it("records stable repository and review identifiers without authored content", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "onprem-gh-cli-mcp-"));
+    temporaryDirectories.push(directory);
+    const auditLogPath = join(directory, "audit.jsonl");
+
+    await appendAuditRecord(auditLogPath, {
+      timestamp: "2026-08-03T01:00:00.000Z",
+      operationId: "operation-review-thread",
+      tool: "resolve_pull_request_review_thread",
+      hostname: "github.com",
+      account: "ma-nakaya",
+      repository: "ma-nakaya/example",
+      repositoryId: 123,
+      pullRequestNumber: 7,
+      reviewCommentId: 101,
+      reviewThreadId: "PRRT_thread101",
+      outcome: "succeeded",
+      durationMs: 12,
+    });
+
+    const text = await readFile(auditLogPath, "utf8");
+    expect(JSON.parse(text.trim())).toMatchObject({
+      repositoryId: 123,
+      reviewCommentId: 101,
+      reviewThreadId: "PRRT_thread101",
+    });
+    expect(text).not.toContain("Inline body");
+  });
+
   it("records a release target without release content", async () => {
     const directory = await mkdtemp(join(tmpdir(), "onprem-gh-cli-mcp-"));
     temporaryDirectories.push(directory);

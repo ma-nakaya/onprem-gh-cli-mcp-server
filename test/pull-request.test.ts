@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertOpenPullRequestAtHead,
   assertReviewBody,
   pullRequestChecksEnvelope,
   pullRequestDetails,
   pullRequestDiffChunk,
   pullRequestFiles,
+  pullRequestMergeResult,
+  pullRequestMutationIdentity,
   pullRequestReviewSummary,
   pullRequestSummary,
 } from "../src/pull-request.js";
@@ -55,6 +58,41 @@ describe("pull request response handling", () => {
     expect(() => assertReviewBody("COMMENT", "Details")).not.toThrow();
     expect(() => assertReviewBody("COMMENT", "  ")).toThrow(/required/);
     expect(() => assertReviewBody("REQUEST_CHANGES", undefined)).toThrow(/required/);
+  });
+
+  it("requires the exact open pull request head before a merge-like mutation", () => {
+    const headSha = "a".repeat(40);
+    const identity = pullRequestMutationIdentity({
+      number: 42,
+      nodeId: "PR_node42",
+      state: "open",
+      merged: false,
+      headSha,
+      url: "https://github.com/example/repo/pull/42",
+    }, 42);
+    expect(() => assertOpenPullRequestAtHead(identity, headSha)).not.toThrow();
+    expect(() => assertOpenPullRequestAtHead(identity, "b".repeat(40))).toThrow(/does not match/);
+    expect(() => assertOpenPullRequestAtHead({ ...identity, state: "closed" }, headSha))
+      .toThrow(/not an open/);
+    expect(() => pullRequestMutationIdentity({ ...identity, number: 43 }, 42))
+      .toThrow(/instead of #42/);
+  });
+
+  it("accepts only a confirmed merge response with a full SHA", () => {
+    expect(pullRequestMergeResult({
+      merged: true,
+      sha: "c".repeat(40),
+      message: "Pull Request successfully merged",
+    })).toEqual({
+      merged: true,
+      sha: "c".repeat(40),
+      message: "Pull Request successfully merged",
+    });
+    expect(() => pullRequestMergeResult({
+      merged: false,
+      sha: null,
+      message: "not merged",
+    })).toThrow(/did not confirm/);
   });
 });
 

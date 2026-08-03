@@ -14,6 +14,10 @@ const expectedTools = [
   "commit_files",
   "list_organizations",
   "list_repositories",
+  "get_repository",
+  "create_repository",
+  "update_repository_description",
+  "delete_repository",
   "list_issues",
   "get_issue",
   "list_issue_comments",
@@ -26,6 +30,18 @@ const expectedTools = [
   "list_pull_request_files",
   "get_pull_request_diff",
   "list_pull_request_checks",
+  "list_pull_request_reviews",
+  "list_pull_request_review_comments",
+  "get_pull_request_review_comment",
+  "list_pull_request_review_threads",
+  "get_pull_request_review_thread",
+  "create_pull_request_review_comment",
+  "reply_pull_request_review_comment",
+  "update_pull_request_review_comment",
+  "delete_pull_request_review_comment",
+  "resolve_pull_request_review_thread",
+  "unresolve_pull_request_review_thread",
+  "merge_pull_request",
   "create_pull_request",
   "update_pull_request",
   "comment_pull_request",
@@ -36,6 +52,10 @@ const expectedTools = [
   "dispatch_workflow",
   "create_release",
   "update_release",
+  "list_labels",
+  "list_issue_labels",
+  "add_issue_labels",
+  "remove_issue_label",
   "create_label",
   "update_label",
   "create_milestone",
@@ -52,8 +72,6 @@ const expectedTools = [
 ];
 
 const forbiddenTools = [
-  "merge_pull_request",
-  "delete_repository",
   "delete_release",
   "delete_project",
   "delete_project_item",
@@ -153,6 +171,14 @@ try {
     "list_pull_request_files",
     "get_pull_request_diff",
     "list_pull_request_checks",
+    "list_pull_request_reviews",
+    "list_pull_request_review_comments",
+    "get_pull_request_review_comment",
+    "list_pull_request_review_threads",
+    "get_pull_request_review_thread",
+    "get_repository",
+    "list_labels",
+    "list_issue_labels",
     "list_workflow_run_jobs",
     "get_workflow_job_log",
   ]) {
@@ -163,6 +189,11 @@ try {
   }
   if (tools.get("dispatch_workflow")?.annotations?.destructiveHint !== true) {
     throw new Error("dispatch_workflow must retain its high-impact hint.");
+  }
+  for (const name of ["merge_pull_request", "delete_pull_request_review_comment", "create_repository", "delete_repository"]) {
+    if (tools.get(name)?.annotations?.destructiveHint !== true) {
+      throw new Error(`${name} must retain its high-impact hint.`);
+    }
   }
   for (const name of expectedTools) {
     const inputSchema = tools.get(name)?.inputSchema;

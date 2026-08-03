@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isLabelColor, isUtcTimestamp, labelSummary, milestoneIdentifier, milestoneSummary } from "../src/repository-metadata.js";
+import { isLabelColor, isUtcTimestamp, labelDetailsList, labelSummary, milestoneIdentifier, milestoneSummary } from "../src/repository-metadata.js";
 
 describe("repository metadata validation", () => {
   it("validates six-digit label colors", () => {
@@ -33,5 +33,28 @@ describe("repository metadata validation", () => {
     expect(milestoneIdentifier({ number: 7 })).toBe(7);
     expect(() => milestoneIdentifier({ number: 0 })).toThrow(/valid number/);
     expect(() => milestoneIdentifier({ number: "7" })).toThrow(/valid number/);
+  });
+
+  it("returns typed label descriptions for read and assignment tools", () => {
+    expect(labelDetailsList([{
+      id: 1,
+      nodeId: "LA_node1",
+      name: "priority-high",
+      color: "A1B2C3",
+      description: "Untrusted label description",
+      isDefault: false,
+      url: "https://api.github.com/repos/example/repo/labels/priority-high",
+      extra: "not returned",
+    }], 1)).toEqual([{
+      id: 1,
+      nodeId: "LA_node1",
+      name: "priority-high",
+      color: "a1b2c3",
+      description: "Untrusted label description",
+      isDefault: false,
+      url: "https://api.github.com/repos/example/repo/labels/priority-high",
+    }]);
+    expect(() => labelDetailsList({}, 1)).toThrow(/expected an array/);
+    expect(() => labelDetailsList([], -1)).toThrow(/non-negative safe integer/);
   });
 });
