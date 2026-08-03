@@ -30,7 +30,7 @@ function configFor(profiles: AccountProfile[]): Config {
 const config = configFor([profile("ma-nakaya")]);
 
 describe("MCP tool registration", () => {
-  it("exposes typed pull request writes without a merge tool", async () => {
+  it("exposes prioritized review, repository administration, merge, and label tools", async () => {
     const server = createServer(config);
     const client = new Client({ name: "test-client", version: "1.0.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -48,7 +48,36 @@ describe("MCP tool registration", () => {
         expect(tools.has(name)).toBe(true);
         expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
       }
-      expect(tools.has("merge_pull_request")).toBe(false);
+      for (const name of [
+        "list_pull_request_reviews",
+        "list_pull_request_review_comments",
+        "get_pull_request_review_comment",
+        "list_pull_request_review_threads",
+        "get_pull_request_review_thread",
+      ]) {
+        expect(tools.get(name)?.annotations?.readOnlyHint).toBe(true);
+        expect(tools.get(name)?.annotations?.destructiveHint).toBe(false);
+      }
+      for (const name of [
+        "create_pull_request_review_comment",
+        "reply_pull_request_review_comment",
+        "update_pull_request_review_comment",
+        "resolve_pull_request_review_thread",
+        "unresolve_pull_request_review_thread",
+      ]) {
+        expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
+        expect(tools.get(name)?.annotations?.destructiveHint).toBe(false);
+      }
+      expect(tools.get("delete_pull_request_review_comment")?.annotations?.readOnlyHint).toBe(false);
+      expect(tools.get("delete_pull_request_review_comment")?.annotations?.destructiveHint).toBe(true);
+      expect(tools.get("merge_pull_request")?.annotations?.readOnlyHint).toBe(false);
+      expect(tools.get("merge_pull_request")?.annotations?.destructiveHint).toBe(true);
+      expect(tools.get("get_repository")?.annotations?.readOnlyHint).toBe(true);
+      expect(tools.get("create_repository")?.annotations?.readOnlyHint).toBe(false);
+      expect(tools.get("create_repository")?.annotations?.destructiveHint).toBe(true);
+      expect(tools.get("update_repository_description")?.annotations?.readOnlyHint).toBe(false);
+      expect(tools.get("delete_repository")?.annotations?.readOnlyHint).toBe(false);
+      expect(tools.get("delete_repository")?.annotations?.destructiveHint).toBe(true);
       expect(tools.has("publish_release")).toBe(false);
       expect(tools.has("delete_release")).toBe(false);
       expect(tools.has("dispatch_workflow")).toBe(true);
@@ -57,6 +86,14 @@ describe("MCP tool registration", () => {
       for (const name of ["create_label", "update_label", "create_milestone", "update_milestone"]) {
         expect(tools.has(name)).toBe(true);
         expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
+      }
+      for (const name of ["list_labels", "list_issue_labels"]) {
+        expect(tools.get(name)?.annotations?.readOnlyHint).toBe(true);
+        expect(tools.get(name)?.annotations?.destructiveHint).toBe(false);
+      }
+      for (const name of ["add_issue_labels", "remove_issue_label"]) {
+        expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
+        expect(tools.get(name)?.annotations?.destructiveHint).toBe(false);
       }
       expect(tools.has("delete_label")).toBe(false);
       expect(tools.has("delete_milestone")).toBe(false);

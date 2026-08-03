@@ -10,6 +10,7 @@ export interface AuditRecord {
   hostname: string;
   account?: string;
   repository?: string;
+  repositoryId?: number;
   owner?: string;
   projectId?: string;
   projectItemId?: string;
@@ -19,6 +20,8 @@ export interface AuditRecord {
   fileCount?: number;
   issueNumber?: number;
   pullRequestNumber?: number;
+  reviewCommentId?: number;
+  reviewThreadId?: string;
   releaseId?: number;
   workflow?: string;
   label?: string;
@@ -37,6 +40,7 @@ export function appendAuditRecord(auditLogPath: string, record: AuditRecord): Pr
     hostname: record.hostname,
     ...(record.account === undefined ? {} : { account: record.account }),
     ...(record.repository === undefined ? {} : { repository: record.repository }),
+    ...(record.repositoryId === undefined ? {} : { repositoryId: record.repositoryId }),
     ...(record.owner === undefined ? {} : { owner: record.owner }),
     ...(record.projectId === undefined ? {} : { projectId: record.projectId }),
     ...(record.projectItemId === undefined ? {} : { projectItemId: record.projectItemId }),
@@ -46,6 +50,8 @@ export function appendAuditRecord(auditLogPath: string, record: AuditRecord): Pr
     ...(record.fileCount === undefined ? {} : { fileCount: record.fileCount }),
     ...(record.issueNumber === undefined ? {} : { issueNumber: record.issueNumber }),
     ...(record.pullRequestNumber === undefined ? {} : { pullRequestNumber: record.pullRequestNumber }),
+    ...(record.reviewCommentId === undefined ? {} : { reviewCommentId: record.reviewCommentId }),
+    ...(record.reviewThreadId === undefined ? {} : { reviewThreadId: record.reviewThreadId }),
     ...(record.releaseId === undefined ? {} : { releaseId: record.releaseId }),
     ...(record.workflow === undefined ? {} : { workflow: record.workflow }),
     ...(record.label === undefined ? {} : { label: record.label }),

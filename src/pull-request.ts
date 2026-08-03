@@ -68,6 +68,21 @@ export interface PullRequestDiffChunk {
   githubMayLimitLargeDiffs: true;
 }
 
+export interface PullRequestMutationIdentity {
+  number: number;
+  nodeId: string;
+  state: string;
+  merged: boolean;
+  headSha: string;
+  url: string;
+}
+
+export interface PullRequestMergeResult {
+  merged: true;
+  sha: string;
+  message: string;
+}
+
 function objectResponse(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`GitHub API returned an unexpected ${label} response.`);
@@ -367,6 +382,61 @@ export function pullRequestReviewSummary(value: unknown): Record<string, unknown
     state: item.state,
     url: item.html_url,
     submittedAt: item.submitted_at,
+  };
+}
+
+export function pullRequestMutationIdentity(
+  value: unknown,
+  expectedNumber: number,
+): PullRequestMutationIdentity {
+  const label = "pull request mutation identity";
+  const item = cliObjectResponse(value, label);
+  const number = integerField(item, "number", label, 1);
+  if (number !== expectedNumber) {
+    throw new Error(`GitHub returned pull request #${number} instead of #${expectedNumber}.`);
+  }
+  const headSha = stringField(item, "headSha", label, false);
+  if (!/^[0-9a-f]{40}$/.test(headSha)) {
+    responseFieldError(label, "headSha", "must be a full lowercase commit SHA");
+  }
+  return {
+    number,
+    nodeId: stringField(item, "nodeId", label, false),
+    state: stringField(item, "state", label, false),
+    merged: booleanField(item, "merged", label),
+    headSha,
+    url: stringField(item, "url", label, false),
+  };
+}
+
+export function assertOpenPullRequestAtHead(
+  identity: PullRequestMutationIdentity,
+  expectedHeadSha: string,
+): void {
+  if (identity.merged || identity.state.toLowerCase() !== "open") {
+    throw new Error(`Pull request #${identity.number} is not an open, unmerged pull request.`);
+  }
+  if (identity.headSha !== expectedHeadSha) {
+    throw new Error(
+      `Pull request #${identity.number} head ${identity.headSha} does not match expectedHeadSha ${expectedHeadSha}.`,
+    );
+  }
+}
+
+export function pullRequestMergeResult(value: unknown): PullRequestMergeResult {
+  const label = "pull request merge";
+  const item = cliObjectResponse(value, label);
+  if (item.merged !== true) {
+    throw new Error("GitHub did not confirm that the pull request was merged.");
+  }
+  const sha = stringField(item, "sha", label, false);
+  if (!/^[0-9a-f]{40}$/.test(sha)) {
+    responseFieldError(label, "sha", "must be a full lowercase commit SHA");
+  }
+  return {
+    merged: true,
+    sha,
+    message: stringField(item, "message", label),
   };
 }
 
