@@ -9,7 +9,7 @@ export interface PullRequestDetails {
   author: {
     login: string;
     isBot: boolean;
-    name: string;
+    name: string | null;
   } | null;
   headRefName: string;
   headRefOid: string;
@@ -126,6 +126,19 @@ function nullableStringField(
   return value;
 }
 
+function optionalNullableStringField(
+  item: Record<string, unknown>,
+  field: string,
+  label: string,
+): string | null {
+  const value = item[field];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") {
+    responseFieldError(label, field, "must be a string, null, or omitted");
+  }
+  return value;
+}
+
 function booleanField(item: Record<string, unknown>, field: string, label: string): boolean {
   const value = item[field];
   if (typeof value !== "boolean") responseFieldError(label, field, "must be a boolean");
@@ -161,7 +174,7 @@ function pullRequestAuthor(value: unknown): PullRequestDetails["author"] {
   return {
     login: stringField(author, "login", "pull request author", false),
     isBot: booleanField(author, "is_bot", "pull request author"),
-    name: stringField(author, "name", "pull request author"),
+    name: optionalNullableStringField(author, "name", "pull request author"),
   };
 }
 
