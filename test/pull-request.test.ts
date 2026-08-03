@@ -108,7 +108,6 @@ describe("read-only pull request response handling", () => {
         id: "MDQ6VXNlcjE=",
         login: "octocat",
         is_bot: false,
-        name: "The Octocat",
         email: "must-not-leak@example.com",
       },
       headRefName: "feature",
@@ -136,7 +135,7 @@ describe("read-only pull request response handling", () => {
       author: {
         login: "octocat",
         isBot: false,
-        name: "The Octocat",
+        name: null,
       },
       headRefName: "feature",
       headRefOid: "abc123",
