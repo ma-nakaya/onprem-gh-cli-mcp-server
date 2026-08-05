@@ -1,0 +1,21 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "onprem-gh-cli": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "--yes",
+        "--package",
+        "file:${PLUGIN_ROOT}",
+        "--",
+        "onprem-gh-cli-mcp"
+      ],
+      "env": {
+        "GH_MCP_AUDIT_LOG_PATH": "${PLUGIN_DATA}/audit.jsonl",
+        "npm_config_cache": "${PLUGIN_DATA}/npm-cache"
+      },
+      "cwd": "${PLUGIN_ROOT}"
+    }
+  }
+}

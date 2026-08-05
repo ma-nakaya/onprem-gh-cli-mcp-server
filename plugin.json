@@ -1,0 +1,19 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "onprem-gh-cli-mcp",
+  "version": "0.1.0",
+  "description": "Operate allowlisted GitHub resources through a local GitHub CLI MCP server with a portable skill for safe account selection, reads, reviews, and writes.",
+  "author": {
+    "name": "ma-nakaya",
+    "url": "https://github.com/ma-nakaya"
+  },
+  "homepage": "https://github.com/ma-nakaya/onprem-gh-cli-mcp-server#readme",
+  "repository": "https://github.com/ma-nakaya/onprem-gh-cli-mcp-server",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "github",
+    "github-cli",
+    "agent-skills"
+  ]
+}
