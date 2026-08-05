@@ -164,7 +164,7 @@ node dist/cli.js
 
 ## 複数GitHubアカウント
 
-認証情報はアカウントごとの`GH_CONFIG_DIR`へ分離しますが、MCPサーバー、Tunnel、Scheduled Task、ChatGPTアプリは分けません。
+認証情報はアカウントごとの`GH_CONFIG_DIR`へ分離しますが、MCPサーバー、Tunnel、Scheduled Taskは分けません。
 
 ```text
 N accounts = N GH_CONFIG_DIR + 1 manifest + 1 MCP process + 1 tunnel profile
@@ -201,8 +201,6 @@ manifestはリポジトリ外へ置く、次の非秘密JSONです。
 2件以上のアカウントがある場合、account対応ツールの`account`入力は必須です。サーバーは選択されたprofileの`GH_CONFIG_DIR`と`GH_HOST`だけを`gh`子プロセスへ渡し、期待loginを検証します。`gh auth switch`は実行せず、active accountを変更しません。
 
 読み取りに失敗し、別アカウントに権限がある可能性がある場合は、別の`account`を指定して同じ読み取りを再実行します。書き込みを別アカウントへ自動的にfallbackするとGitHub上の作成者が変わるため禁止です。
-
-アカウント別認証、manifest作成、単一Tunnel/Scheduled Taskへの移行手順は[ChatGPT connectivity runbook](docs/chatgpt-connectivity.md)を参照してください。
 
 ## 監査ログ
 
@@ -241,49 +239,6 @@ Issue・Pull Request・Draft Release・Workflow Dispatch・Label・Milestone操�
 - GitHub CLIの標準出力・標準エラー全文
 
 開始レコードを書けない場合、書き込み操作は実行しません。完了レコードの書き込みに失敗した場合は、MCPレスポンスの`audit.completed`が`false`になります。
-
-## Secure MCP Tunnel設定例
-
-npm公開前はローカルビルドをSecure MCP Tunnelからstdio起動してChatGPTとの疎通を確認できます。アカウント数にかかわらずTunnel ID、profile、health port、MCPプロセス、ChatGPTアプリは各1つです。Scheduled Task運用ではRuntime API Keyを現在のUser環境へ意図的に永続化します。Machine環境への永続化は使用せず、VBSもUser環境の値だけをprocessへコピーします。Runtime API Keyをリポジトリ、manifest、VBS、Scheduled Task引数、ログへ保存せず、User環境へのアクセス制御はOSのセキュリティポリシーに従ってください。より強い保護が必要な環境では、この永続環境launcherの代わりに承認・レビュー済みsecret broker launcherを使用してください。GitHub CLI認証情報はアカウント別credential store / `GH_CONFIG_DIR`に限定し、manifestやTask引数へ保存しません。Tunnel IDは認証情報ではなく`init`に必要な識別子ですが、リポジトリへcommitしたり意図したTunnel運用者以外へ共有したりしないでください。
-
-```powershell
-npm run build
-npm run smoke:stdio
-
-tunnel-client.exe init `
-  --sample sample_mcp_stdio_local `
-  --profile gh-cli `
-  --tunnel-id <tunnel-id> `
-  --health-listen-addr "127.0.0.1:8081" `
-  --mcp-command "node C:\src\onprem-gh-cli-mcp-server\dist\cli.js"
-
-tunnel-client.exe doctor --profile gh-cli --explain
-```
-
-書き込みツールを使う前に、1つのChatGPTアプリから各`account`を指定して`get_auth_status`をend-to-endで実行し、期待loginと実loginの一致を確認してください。
-
-ChatGPT Developer modeでのTunnel選択、Scan Tools、読み取り疎通確認を含む手順は[ChatGPT connectivity runbook](docs/chatgpt-connectivity.md)を参照してください。
-
-手動疎通確認後は、`scripts/windows/run-gh-cli-mcp-tunnel.vbs`と`install-gh-cli-tunnel-task.ps1`を使用して、1つのTunnel Clientをコンソール非表示でログオン時に起動できます。Installerはwrapperのv3 handshake、GitHub CLI 2.81.0以上と必要なJSON機能、manifest構造、独立したhost許可境界、各アカウントの分離された`GH_CONFIG_DIR`、期待loginを検証してから、現在の対話ユーザー用Scheduled Taskを1件登録します。Runtime API Keyは現在のUser環境へ永続化しますが、Runtime API KeyとGitHub tokenをVBS、manifest、Scheduled Task引数、ログ、リポジトリへ保存しません。Machine環境のRuntime API KeyはInstallerが受け付けません。
-
-```powershell
-$installer = "C:\Workspace\onprem-gh-cli-mcp-server\scripts\windows\install-gh-cli-tunnel-task.ps1"
-$manifestPath = Join-Path $env:LOCALAPPDATA "onprem-gh-cli-mcp\accounts.json"
-$ghPath = (Get-Command gh.exe).Source
-$auditDir = Join-Path $env:LOCALAPPDATA "onprem-gh-cli-mcp\audit"
-New-Item -ItemType Directory -Force $auditDir | Out-Null
-
-& $installer `
-  -AccountsFile $manifestPath `
-  -ProfileName "gh-cli" `
-  -AuditLogPath (Join-Path $auditDir "audit.jsonl") `
-  -LogPath "C:\Apps\TunnelClient\gh-cli-tunnel-client.log" `
-  -GhPath $ghPath `
-  -AllowedHosts "github.com" `
-  -TaskName "OpenAI Secure MCP Tunnel - GH CLI"
-```
-
-`-AllowedHosts`の既定値は`github.com`です。Installerはこの値をmanifestとは独立した許可境界として正規化・検証し、manifest内の全`hostname`が含まれる場合だけ固定CSVをwrapperへ渡します。監査ログとTunnelログは別ファイルとし、manifest、wrapper、`gh.exe`、`GH_CONFIG_DIR`内を出力先にできません。既存の同名root taskは、状態が厳密に`Ready`であり、現在の対話ユーザー、単一の`wscript.exe` Exec action、同じwrapper path / working directoryを持つと検証できた場合だけ置換します。
 
 ## セキュリティ
 
@@ -324,7 +279,7 @@ New-Item -ItemType Directory -Force $auditDir | Out-Null
 - Phase 2f: GitHub Projects v2作成・更新、Item/Field一覧、既存Issue/PR追加、Field値設定・消去、Item archive/restore
 - Phase 3a: 単一MCPプロセスによる複数GitHub CLIアカウント選択、監査account、認証分離
 - Phase 3b: PRレビューthread／インライン会話、SHA固定PRマージ、Repository作成・説明更新・確認付き削除、Issue/PR Label割り当て
-- Phase 4a: ChatGPT / Secure MCP Tunnel疎通手順とstdioスモークテスト
+- Phase 4a: stdio接続とスモークテスト
 - 未実装: Release公開、Project/Item削除、Project Field定義変更、Draft Item、Secret、既存Repositoryのrename・visibility変更・transfer、外部承認システムによる二段階承認
 
 ## 開発
