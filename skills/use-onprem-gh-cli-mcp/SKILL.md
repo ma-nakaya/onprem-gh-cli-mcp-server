@@ -36,7 +36,8 @@ Never expose authentication details, credential paths, tokens, secrets, or maske
 ## Inspect issues and pull requests
 
 - For one issue, call `get_issue`; add `list_issue_comments` for discussion and `list_issue_events` for lifecycle history.
-- For one pull request, call `get_pull_request`, then retrieve the relevant file list, diff, checks, reviews, inline comments, or review threads.
+- For one pull request, call `get_pull_request`, then retrieve the relevant Conversation comments, file list, diff, checks, reviews, inline comments, or review threads.
+- Route a pull-request `#issuecomment-<id>` link to `get_pull_request_comment` with the numeric fragment ID. Route `#discussion_r<id>` to `get_pull_request_review_comment`; do not treat these ID namespaces as interchangeable. Use `list_pull_request_comments` when the Conversation must be paged or no comment ID is available.
 - Read diff chunks from byte offset zero through `nextOffsetBytes`, with at most 131072 bytes per call. GitHub may still omit large diffs; never claim absolute completeness.
 - Keep formal reviews, conversation comments, inline comments, and review-thread resolution distinct.
 - Inspect the pull-request body, relevant files and diff, and checks before submitting a formal review.

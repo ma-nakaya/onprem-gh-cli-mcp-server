@@ -49,6 +49,8 @@ describe("MCP tool registration", () => {
         expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
       }
       for (const name of [
+        "list_pull_request_comments",
+        "get_pull_request_comment",
         "list_pull_request_reviews",
         "list_pull_request_review_comments",
         "get_pull_request_review_comment",

@@ -1,6 +1,6 @@
 # On-Premises GitHub CLI MCP tool contract
 
-Verified against the public repository [`ma-nakaya/onprem-gh-cli-mcp-server`](https://github.com/ma-nakaya/onprem-gh-cli-mcp-server) at commit [`3e32d53befc6833f0d5ca9a1cbb34e90ca038f93`](https://github.com/ma-nakaya/onprem-gh-cli-mcp-server/commit/3e32d53befc6833f0d5ca9a1cbb34e90ca038f93).
+Verified against the public repository [`ma-nakaya/onprem-gh-cli-mcp-server`](https://github.com/ma-nakaya/onprem-gh-cli-mcp-server) at commit [`2d3d477747dbd45c0b6853cc7e0e5ff0cc7f9fee`](https://github.com/ma-nakaya/onprem-gh-cli-mcp-server/commit/2d3d477747dbd45c0b6853cc7e0e5ff0cc7f9fee).
 
 The names below are the MCP server's bare tool names. A client may display a wrapper or namespace, but a portable skill must not depend on that client-specific prefix. Recheck the server's advertised tools when running a different revision.
 
@@ -62,6 +62,8 @@ Issue numbers are positive integers. `list_issues` accepts `state` and `limit` u
 
 - `list_pull_requests`
 - `get_pull_request`
+- `list_pull_request_comments`
+- `get_pull_request_comment`
 - `list_pull_request_files`
 - `get_pull_request_diff`
 - `list_pull_request_checks`
@@ -85,9 +87,12 @@ Issue numbers are positive integers. `list_issues` accepts `state` and `limit` u
 Key arguments and limits:
 
 - `list_pull_request_files`: `page` 1-3,000 and `perPage` 1-100 (default 100); GitHub exposes at most 3,000 changed files.
+- `list_pull_request_comments`: top-level Conversation comments use `page` 1-10,000 and `perPage` 1-100 (default 100). Pagination reports `page`, `perPage`, and `returnedCount`; `hasNextPage` is intentionally omitted because a full page does not prove another page exists. When `returnedCount` equals `perPage`, request the next page and stop after a shorter page.
+- `get_pull_request_comment`: supply the positive numeric `commentId` from a pull-request `#issuecomment-<id>` URL fragment. The server verifies both the target is a pull request and the returned comment belongs to that repository and pull-request number.
 - `get_pull_request_diff`: `offsetBytes` and `limitBytes` up to 131,072. Follow `nextOffsetBytes`, while treating upstream completeness as not guaranteed.
 - `list_pull_request_checks`: optional `requiredOnly`, `offset` 0-10,000, and `limit` 1-100 (default 100).
 - `list_pull_request_reviews` and `list_pull_request_review_comments`: `page` 1-3,000 and `perPage` 1-100 (default 50).
+- Pull-request Conversation comments (`#issuecomment-<id>`) are Issue comments in the GitHub API and are distinct from inline review comments (`#discussion_r<id>`). Use the corresponding typed tool; never interchange their numeric IDs.
 - `list_pull_request_review_threads`: `first` 1-50 (default 20), optional `after`, and `commentsFirst` 1-50 (default 10). `get_pull_request_review_thread` accepts `commentsFirst` up to 100 and `commentsAfter`.
 - `create_pull_request_review_comment`: require `expectedHeadSha`, `path`, body, and a valid file-level or line-level target. Line sides are `LEFT` or `RIGHT`.
 - `update_pull_request_review_comment`: require the current `expectedUpdatedAt`. `delete_pull_request_review_comment` additionally requires the verified node ID and permanently deletes the comment.
