@@ -1713,7 +1713,6 @@ export function createServer(config: Config): McpServer {
         page,
         perPage,
         returnedCount: comments.length,
-        hasNextPage: comments.length === perPage,
       },
       source: pullRequestSource(readRequest.context, readRequest.repository, pullRequestNumber),
       contentTrust: REPOSITORY_CONTENT_TRUST,
