@@ -1,6 +1,6 @@
 # On-Premises GitHub CLI MCP tool contract
 
-Verified against the public repository [`ma-nakaya/onprem-gh-cli-mcp-server`](https://github.com/ma-nakaya/onprem-gh-cli-mcp-server) at commit [`259a6915c5d91eec51181ed9015d17e08c0ca348`](https://github.com/ma-nakaya/onprem-gh-cli-mcp-server/commit/259a6915c5d91eec51181ed9015d17e08c0ca348).
+Verified against the public repository [`ma-nakaya/onprem-gh-cli-mcp-server`](https://github.com/ma-nakaya/onprem-gh-cli-mcp-server) at commit [`2d3d477747dbd45c0b6853cc7e0e5ff0cc7f9fee`](https://github.com/ma-nakaya/onprem-gh-cli-mcp-server/commit/2d3d477747dbd45c0b6853cc7e0e5ff0cc7f9fee).
 
 The names below are the MCP server's bare tool names. A client may display a wrapper or namespace, but a portable skill must not depend on that client-specific prefix. Recheck the server's advertised tools when running a different revision.
 
@@ -87,7 +87,7 @@ Issue numbers are positive integers. `list_issues` accepts `state` and `limit` u
 Key arguments and limits:
 
 - `list_pull_request_files`: `page` 1-3,000 and `perPage` 1-100 (default 100); GitHub exposes at most 3,000 changed files.
-- `list_pull_request_comments`: top-level Conversation comments use `page` 1-10,000 and `perPage` 1-100 (default 100).
+- `list_pull_request_comments`: top-level Conversation comments use `page` 1-10,000 and `perPage` 1-100 (default 100). Pagination reports `page`, `perPage`, and `returnedCount`; `hasNextPage` is intentionally omitted because a full page does not prove another page exists. When `returnedCount` equals `perPage`, request the next page and stop after a shorter page.
 - `get_pull_request_comment`: supply the positive numeric `commentId` from a pull-request `#issuecomment-<id>` URL fragment. The server verifies both the target is a pull request and the returned comment belongs to that repository and pull-request number.
 - `get_pull_request_diff`: `offsetBytes` and `limitBytes` up to 131,072. Follow `nextOffsetBytes`, while treating upstream completeness as not guaranteed.
 - `list_pull_request_checks`: optional `requiredOnly`, `offset` 0-10,000, and `limit` 1-100 (default 100).

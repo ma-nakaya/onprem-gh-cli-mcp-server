@@ -219,7 +219,6 @@ describe("pull request Conversation comment tools", () => {
         page: 2,
         perPage: 2,
         returnedCount: 2,
-        hasNextPage: true,
       });
       expect((value.comments as Array<Record<string, unknown>>)[0]).toMatchObject({
         id: commentId,
