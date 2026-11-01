@@ -19,6 +19,13 @@ import {
 import type {
   RunGhOptions,
 } from "./gh-runner.js";
+import { z } from "zod";
+import { assertRepositoryPath } from "./git-data.js";
+import {
+  isLabelColor,
+  isUtcTimestamp,
+} from "./repository-metadata.js";
+import { isWorkflowIdentifier } from "./workflow.js";
 import {
   assertRepositoryAllowed,
 } from "./policy.js";
@@ -35,6 +42,7 @@ import {
   assertProjectOwner,
 } from "./project.js";
 import {
+  assertGitReadRef,
   assertRepositoryReadPath,
   canonicalRepositoryIdentity,
   encodeGitReadRef,
@@ -659,3 +667,83 @@ export function commentSummary(value: unknown): Record<string, unknown> {
   };
 }
 
+export function buildContextSchemas(config: Config) {
+  const accountSelectorSchema = z.string()
+    .trim()
+    .min(1)
+    .max(100)
+    .regex(/^[A-Za-z0-9_.-]+$/, "Account must be a configured GitHub account id.");
+  const accountInputSchema = config.accountProfiles.size === 1
+    ? accountSelectorSchema.optional()
+    : accountSelectorSchema;
+  const requestContextSchema = {
+    account: accountInputSchema,
+    hostname: z.string().trim().min(1).optional(),
+  };
+  const repositorySchema = {
+    ...requestContextSchema,
+    repository: z.string().describe("Repository in owner/name format"),
+  };
+  const writeContextSchema = repositorySchema;
+  return { requestContextSchema, repositorySchema, writeContextSchema };
+}
+
+export function resolveTextChunkMaxBytes(config: Config): number {
+  return Math.max(
+    1,
+    Math.min(128 * 1024, Math.floor(Math.max(1, config.maxOutputBytes - 4096) / 6)),
+  );
+}
+
+export function buildSharedSchemas() {
+  const gitRefSchema = z.string().trim().min(1).max(255).refine(
+    (value) => !/[\0\r\n]/.test(value),
+    "Git reference must not contain control characters.",
+  );
+  const repositoryReadRefSchema = z.string().min(1).max(255).refine((value) => {
+    try { assertGitReadRef(value); return true; } catch { return false; }
+  }, "Ref must be a canonical branch, tag, or full commit SHA.");
+  const repositoryTreePathSchema = z.string().max(4096).refine((value) => {
+    try { assertRepositoryReadPath(value, true); return true; } catch { return false; }
+  }, "Repository directory path must be a normalized relative Git path.").default("");
+  const repositoryReadFilePathSchema = z.string().min(1).max(4096).refine((value) => {
+    try { assertRepositoryReadPath(value); return true; } catch { return false; }
+  }, "Repository file path must be a normalized relative Git path.");
+  const workflowIdentifierSchema = z.string().trim().min(1).max(255).refine(
+    isWorkflowIdentifier,
+    "Workflow must be a positive numeric ID or a .yml/.yaml file name.",
+  );
+  const labelNameSchema = z.string().trim().min(1).max(50);
+  const labelColorSchema = z.string().refine(isLabelColor, "Label color must be exactly six hexadecimal characters.");
+  const dueOnSchema = z.string().refine(isUtcTimestamp, "Milestone dueOn must be a valid UTC ISO 8601 timestamp.");
+  const ownerLoginSchema = z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9_.-]+$/);
+  const projectIdSchema = z.string().trim().min(8).max(128).regex(/^PVT_[A-Za-z0-9_-]+$/);
+  const projectItemIdSchema = z.string().trim().min(8).max(128).regex(/^PVTI_[A-Za-z0-9_-]+$/);
+  const projectFieldIdSchema = z.string().trim().min(8).max(256).regex(/^[A-Za-z0-9_-]+$/);
+  const branchNameSchema = z.string().trim().min(1).max(255).regex(/^(?!\/)(?!.*(?:\.\.|\/\/|@\{|\\|\s))[A-Za-z0-9._\/-]+(?<![\/.])$/);
+  const commitShaSchema = z.string().trim().regex(/^[0-9a-f]{40}$/);
+  const repositoryPathSchema = z.string().trim().min(1).max(1024).refine((value) => {
+    try { assertRepositoryPath(value); return true; } catch { return false; }
+  }, "Repository file path must be a normalized relative path.");
+  const repositoryNameSchema = z.string().trim().min(1).max(100)
+    .regex(/^[A-Za-z0-9_.-]+$/)
+    .refine((value) => value !== "." && value !== "..", "Repository name must be canonical.");
+  const repositoryIdSchema = z.number().int().positive();
+  const repositoryDescriptionSchema = z.string().max(160).nullable();
+  const reviewCommentIdSchema = z.number().int().positive();
+  const reviewThreadIdSchema = z.string().trim().min(8).max(256)
+    .refine((value) => !/[\0\r\n]/.test(value), "Review thread ID must not contain control characters.");
+  const graphqlCursorSchema = z.string().min(1).max(512)
+    .refine((value) => !/[\0\r\n]/.test(value), "GraphQL cursor must not contain control characters.");
+  const apiPageSchema = z.number().int().min(1).max(10_000).default(1);
+  const apiPerPageSchema = z.number().int().min(1).max(100).default(100);
+  return {
+    gitRefSchema, repositoryReadRefSchema, repositoryTreePathSchema,
+    repositoryReadFilePathSchema, workflowIdentifierSchema, labelNameSchema,
+    labelColorSchema, dueOnSchema, ownerLoginSchema, projectIdSchema,
+    projectItemIdSchema, projectFieldIdSchema, branchNameSchema,
+    commitShaSchema, repositoryPathSchema, repositoryNameSchema,
+    repositoryIdSchema, repositoryDescriptionSchema, reviewCommentIdSchema,
+    reviewThreadIdSchema, graphqlCursorSchema, apiPageSchema, apiPerPageSchema,
+  };
+}
