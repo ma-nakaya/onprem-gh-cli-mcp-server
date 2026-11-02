@@ -861,6 +861,180 @@ describe("MCP account and resource isolation", () => {
     }
   });
 
+  it("changes project visibility through update_project", async () => {
+    let updateVariables: Record<string, unknown> = {};
+    runGhMock.mockImplementation(async (args, _config, _context, options) => {
+      if (args[1] === "user") {
+        return { exitCode: 0, stdout: "masa-nakaya\n", stderr: "" };
+      }
+      if (args[1] === "graphql") {
+        const payload = JSON.parse(options?.stdin ?? "{}") as { query: string; variables: Record<string, unknown> };
+        if (payload.query.includes("node(id")) {
+          return { exitCode: 0, stdout: JSON.stringify({ data: { node: { __typename: "ProjectV2", id: "PVT_project123", number: 3, title: "Roadmap", url: "https://github.com/users/masa-nakaya/projects/3", closed: false, public: false, owner: { login: "masa-nakaya" } } } }), stderr: "" };
+        }
+        if (payload.query.includes("updateProjectV2(")) {
+          updateVariables = payload.variables;
+          return { exitCode: 0, stdout: JSON.stringify({ data: { updateProjectV2: { projectV2: { id: "PVT_project123", number: 3, title: "Roadmap", url: "https://github.com/users/masa-nakaya/projects/3", closed: false, public: true } } } }), stderr: "" };
+        }
+      }
+      throw new Error(`Unexpected gh call in test: ${args.join(" ")}`);
+    });
+    const connection = await connectedClient(accountConfig());
+
+    try {
+      const result = await connection.client.callTool({
+        name: "update_project",
+        arguments: { owner: "masa-nakaya", projectId: "PVT_project123", public: true },
+      });
+
+      expect(result.isError).not.toBe(true);
+      expect(updateVariables).toEqual({ projectId: "PVT_project123", public: true });
+      const parsed = JSON.parse((result.content[0] as { text: string }).text);
+      expect(parsed.project.isPublic).toBe(true);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("deletes a project only when the confirmation title matches exactly", async () => {
+    let deleteCalled = false;
+    runGhMock.mockImplementation(async (args, _config, _context, options) => {
+      if (args[1] === "user") {
+        return { exitCode: 0, stdout: "masa-nakaya\n", stderr: "" };
+      }
+      if (args[1] === "graphql") {
+        const payload = JSON.parse(options?.stdin ?? "{}") as { query: string };
+        if (payload.query.includes("node(id")) {
+          return { exitCode: 0, stdout: JSON.stringify({ data: { node: { __typename: "ProjectV2", id: "PVT_project123", number: 3, title: "Roadmap", url: "https://github.com/users/masa-nakaya/projects/3", closed: false, public: false, owner: { login: "masa-nakaya" } } } }), stderr: "" };
+        }
+        if (payload.query.includes("deleteProjectV2(")) {
+          deleteCalled = true;
+          return { exitCode: 0, stdout: JSON.stringify({ data: { deleteProjectV2: { projectV2: { id: "PVT_project123", number: 3, title: "Roadmap", url: "https://github.com/users/masa-nakaya/projects/3", closed: false, public: false } } } }), stderr: "" };
+        }
+      }
+      throw new Error(`Unexpected gh call in test: ${args.join(" ")}`);
+    });
+    const connection = await connectedClient(accountConfig());
+
+    try {
+      const refused = await connection.client.callTool({
+        name: "delete_project",
+        arguments: { owner: "masa-nakaya", projectId: "PVT_project123", confirmTitle: "Wrong title" },
+      });
+      expect(refused.isError).toBe(true);
+      expect(JSON.stringify(refused.content)).toMatch(/confirmTitle must exactly match/);
+      expect(deleteCalled).toBe(false);
+
+      const result = await connection.client.callTool({
+        name: "delete_project",
+        arguments: { owner: "masa-nakaya", projectId: "PVT_project123", confirmTitle: "Roadmap" },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(deleteCalled).toBe(true);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("creates a draft item and deletes a project item", async () => {
+    runGhMock.mockImplementation(async (args, _config, _context, options) => {
+      if (args[1] === "user") {
+        return { exitCode: 0, stdout: "masa-nakaya\n", stderr: "" };
+      }
+      if (args[1] === "graphql") {
+        const payload = JSON.parse(options?.stdin ?? "{}") as { query: string };
+        if (payload.query.includes("node(id")) {
+          return { exitCode: 0, stdout: JSON.stringify({ data: { node: { __typename: "ProjectV2", id: "PVT_project123", owner: { login: "masa-nakaya" } } } }), stderr: "" };
+        }
+        if (payload.query.includes("addProjectV2DraftIssue(")) {
+          return { exitCode: 0, stdout: JSON.stringify({ data: { addProjectV2DraftIssue: { projectV2Item: { id: "PVTI_item123", isArchived: false } } } }), stderr: "" };
+        }
+        if (payload.query.includes("deleteProjectV2Item(")) {
+          return { exitCode: 0, stdout: JSON.stringify({ data: { deleteProjectV2Item: { deletedItemId: "PVTI_item123" } } }), stderr: "" };
+        }
+      }
+      throw new Error(`Unexpected gh call in test: ${args.join(" ")}`);
+    });
+    const connection = await connectedClient(accountConfig());
+
+    try {
+      const created = await connection.client.callTool({
+        name: "create_project_draft_item",
+        arguments: { owner: "masa-nakaya", projectId: "PVT_project123", title: "Draft task" },
+      });
+      expect(created.isError).not.toBe(true);
+      expect(JSON.parse((created.content[0] as { text: string }).text).item.id).toBe("PVTI_item123");
+
+      const deleted = await connection.client.callTool({
+        name: "delete_project_item",
+        arguments: { owner: "masa-nakaya", projectId: "PVT_project123", itemId: "PVTI_item123" },
+      });
+      expect(deleted.isError).not.toBe(true);
+      expect(JSON.parse((deleted.content[0] as { text: string }).text).deleted.itemId).toBe("PVTI_item123");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("creates and deletes a single-select project field", async () => {
+    runGhMock.mockImplementation(async (args, _config, _context, options) => {
+      if (args[1] === "user") {
+        return { exitCode: 0, stdout: "masa-nakaya\n", stderr: "" };
+      }
+      if (args[1] === "graphql") {
+        const payload = JSON.parse(options?.stdin ?? "{}") as { query: string };
+        if (payload.query.includes("node(id")) {
+          return { exitCode: 0, stdout: JSON.stringify({ data: { node: { __typename: "ProjectV2", id: "PVT_project123", owner: { login: "masa-nakaya" } } } }), stderr: "" };
+        }
+        const field = { id: "PVTF_field123", name: "Status", dataType: "SINGLE_SELECT", __typename: "ProjectV2SingleSelectField", options: [{ id: "o1", name: "Todo" }] };
+        if (payload.query.includes("createProjectV2Field(")) {
+          return { exitCode: 0, stdout: JSON.stringify({ data: { createProjectV2Field: { projectV2Field: field } } }), stderr: "" };
+        }
+        if (payload.query.includes("deleteProjectV2Field(")) {
+          return { exitCode: 0, stdout: JSON.stringify({ data: { deleteProjectV2Field: { projectV2Field: field } } }), stderr: "" };
+        }
+      }
+      throw new Error(`Unexpected gh call in test: ${args.join(" ")}`);
+    });
+    const connection = await connectedClient(accountConfig());
+
+    try {
+      const created = await connection.client.callTool({
+        name: "create_project_field",
+        arguments: {
+          owner: "masa-nakaya",
+          projectId: "PVT_project123",
+          name: "Status",
+          dataType: "SINGLE_SELECT",
+          singleSelectOptions: [{ name: "Todo", color: "GRAY" }],
+        },
+      });
+      expect(created.isError).not.toBe(true);
+      expect(JSON.parse((created.content[0] as { text: string }).text).field.id).toBe("PVTF_field123");
+
+      const refused = await connection.client.callTool({
+        name: "create_project_field",
+        arguments: {
+          owner: "masa-nakaya",
+          projectId: "PVT_project123",
+          name: "Note",
+          dataType: "TEXT",
+          singleSelectOptions: [{ name: "Todo" }],
+        },
+      });
+      expect(refused.isError).toBe(true);
+      expect(JSON.stringify(refused.content)).toMatch(/only be provided for SINGLE_SELECT/);
+
+      const deleted = await connection.client.callTool({
+        name: "delete_project_field",
+        arguments: { owner: "masa-nakaya", projectId: "PVT_project123", fieldId: "PVTF_field123" },
+      });
+      expect(deleted.isError).not.toBe(true);
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("audits a GraphQL mutation rejected through top-level errors as failed", async () => {
     runGhMock.mockImplementation(async (args) => {
       if (args[1] === "user") {

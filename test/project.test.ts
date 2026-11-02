@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildUpdateProjectMutation, graphqlProject, ownerNodeId, projectFieldValue, projectFieldsSummary, projectIdentifier, projectItemsSummary, projectSummary } from "../src/project.js";
+import { buildUpdateProjectMutation, graphqlDeletedItemId, graphqlProject, graphqlProjectField, ownerNodeId, projectFieldSummary, projectFieldValue, projectFieldsSummary, projectIdentifier, projectItemsSummary, projectSummary } from "../src/project.js";
 
 describe("GitHub Projects v2 response handling", () => {
   const project = {
@@ -68,5 +68,38 @@ describe("GitHub Projects v2 response handling", () => {
     expect(projectFieldValue("iteration", "iteration-1")).toEqual({ iterationId: "iteration-1" });
     expect(() => projectFieldValue("date", "22/07/2026")).toThrow(/YYYY-MM-DD/);
     expect(() => projectFieldValue("number", Number.NaN)).toThrow(/finite/);
+  });
+});
+
+describe("project lifecycle helpers", () => {
+  it("includes visibility in an update mutation when requested", () => {
+    const update = buildUpdateProjectMutation("PVT_example123", { public: true });
+    expect(update.variables).toEqual({ projectId: "PVT_example123", public: true });
+    expect(update.query).toContain("$public: Boolean");
+    expect(update.query).toContain("public: $public");
+  });
+
+  it("projects a single field with its options", () => {
+    const value = { data: { createProjectV2Field: { projectV2Field: {
+      id: "PVTF_field123",
+      name: "Status",
+      dataType: "SINGLE_SELECT",
+      __typename: "ProjectV2SingleSelectField",
+      options: [{ id: "o1", name: "Todo" }],
+    } } } };
+    expect(graphqlProjectField(value, "createProjectV2Field").id).toBe("PVTF_field123");
+    expect(projectFieldSummary(graphqlProjectField(value, "createProjectV2Field"))).toEqual({
+      id: "PVTF_field123",
+      name: "Status",
+      dataType: "SINGLE_SELECT",
+      type: "ProjectV2SingleSelectField",
+      options: [{ id: "o1", name: "Todo" }],
+    });
+  });
+
+  it("reads the deleted item ID from a delete item payload", () => {
+    expect(graphqlDeletedItemId({ data: { deleteProjectV2Item: { deletedItemId: "PVTI_item123" } } }))
+      .toBe("PVTI_item123");
+    expect(() => graphqlDeletedItemId({ data: { deleteProjectV2Item: {} } })).toThrow(/without an item ID/);
   });
 });
