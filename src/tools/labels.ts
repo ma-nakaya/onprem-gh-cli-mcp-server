@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Config } from "../config.js";
+import { runGh } from "../gh-runner.js";
 import { assertRepositoryAllowed } from "../policy.js";
 import {
   LABEL_DETAILS_JQ,
@@ -237,7 +238,7 @@ server.registerTool("create_label", {
 });
 
 server.registerTool("update_label", {
-  description: "Update an existing label name, color, or description. This tool cannot delete labels.",
+  description: "Update an existing label name, color, or description.",
   inputSchema: {
     ...writeContextSchema,
     currentName: labelNameSchema,
@@ -271,5 +272,33 @@ server.registerTool("update_label", {
     config,
   );
   return response({ label: labelSummary(operation.value), audit: operation.audit });
+});
+server.registerTool("delete_label", {
+  description: "Delete a label from an allowed repository. Issues and pull requests keep existing label assignments history but lose this label. This operation cannot be undone by this MCP server.",
+  inputSchema: {
+    ...writeContextSchema,
+    name: labelNameSchema,
+  },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+}, async ({ account, repository, hostname, name }) => {
+  const normalizedRepository = repository.trim();
+  const normalizedName = name.trim();
+  const request = await prepareWriteRequest({
+    tool: "delete_label",
+    repository: normalizedRepository,
+    label: normalizedName,
+  }, config, account, hostname);
+  const { context } = request;
+  assertRepositoryAllowed(repository, context);
+  const normalizedHostname = context.profile.hostname;
+  const labelPath = `repos/${normalizedRepository}/labels/${encodeURIComponent(normalizedName)}`;
+  const existing = await jsonGh(["api", labelPath, "--hostname", normalizedHostname], config, context);
+  const summary = labelSummary(existing);
+  const operation = await auditedOperation(
+    request,
+    config,
+    () => runGh(["api", labelPath, "--hostname", normalizedHostname, "--method", "DELETE"], config, context),
+  );
+  return response({ deleted: { label: summary, repository: normalizedRepository }, audit: operation.audit });
 });
 }
