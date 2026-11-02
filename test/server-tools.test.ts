@@ -90,6 +90,10 @@ describe("MCP tool registration", () => {
       expect(tools.get("list_release_assets")?.annotations?.readOnlyHint).toBe(true);
       expect(tools.get("upload_release_asset")?.annotations?.readOnlyHint).toBe(false);
       expect(tools.get("delete_release_asset")?.annotations?.destructiveHint).toBe(true);
+      expect(tools.get("cancel_workflow_run")?.annotations?.destructiveHint).toBe(true);
+      expect(tools.get("rerun_workflow_run")?.annotations?.readOnlyHint).toBe(false);
+      expect(tools.get("rerun_workflow_run")?.annotations?.destructiveHint).toBe(false);
+      expect(tools.get("delete_workflow_run")?.annotations?.destructiveHint).toBe(true);
       for (const name of ["rename_repository", "set_repository_archived", "transfer_repository", "delete_branch"]) {
         expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
         expect(tools.get(name)?.annotations?.destructiveHint).toBe(true);

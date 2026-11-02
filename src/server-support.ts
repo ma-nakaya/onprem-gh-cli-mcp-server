@@ -488,6 +488,7 @@ export interface AuditTarget {
   releaseAssetId?: number;
   secretName?: string;
   workflow?: string;
+  workflowRunId?: number;
   label?: string;
   milestoneNumber?: number;
 }

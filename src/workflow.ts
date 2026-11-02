@@ -252,3 +252,27 @@ export function normalizeWorkflowInputs(inputs: Record<string, string>): Record<
   }
   return normalized;
 }
+
+export interface WorkflowRunState {
+  id: number;
+  status: string;
+  conclusion: string | null;
+  name: string | null;
+}
+
+export function workflowRunState(value: unknown): WorkflowRunState {
+  const item = objectResponse(value);
+  if (
+    typeof item.id !== "number"
+    || typeof item.status !== "string"
+    || !(typeof item.conclusion === "string" || item.conclusion === null)
+  ) {
+    throw new Error("GitHub API returned an unexpected workflow run response.");
+  }
+  return {
+    id: item.id,
+    status: item.status,
+    conclusion: item.conclusion,
+    name: typeof item.name === "string" ? item.name : null,
+  };
+}

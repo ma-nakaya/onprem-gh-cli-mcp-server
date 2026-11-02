@@ -8,6 +8,7 @@ import {
   WORKFLOW_JOB_IDENTITY_JQ,
   WORKFLOW_RUN_JOBS_JQ,
   auditedJsonGh,
+  auditedOperation,
   buildContextSchemas,
   buildSharedSchemas,
   jsonGh,
@@ -24,6 +25,7 @@ import {
   assertWorkflowJobIdentity,
   normalizeWorkflowInputs,
   workflowRunJobs,
+  workflowRunState,
   workflowRunLogChunk,
   workflowSummary,
 } from "../workflow.js";
@@ -166,5 +168,129 @@ export function registerWorkflowTools(server: McpServer, config: Config): void {
       config,
     );
     return response({ accepted: true, workflow: workflowSummary(existing), ref: normalizedRef, audit: operation.audit });
+  });
+  const readWorkflowRun = async (
+    context: Parameters<typeof jsonGh>[2],
+    repository: string,
+    runId: number,
+  ) => workflowRunState(await jsonGh(
+    ["api", `repos/${repository}/actions/runs/${runId}`, "--hostname", context.profile.hostname],
+    config,
+    context,
+  ));
+
+  server.registerTool("cancel_workflow_run", {
+    description: "Cancel a workflow run that has not completed in an allowed repository.",
+    inputSchema: { ...writeContextSchema, runId: workflowRunIdSchema },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  }, async ({ account, repository, hostname, runId }) => {
+    const normalizedRepository = repository.trim();
+    const request = await prepareWriteRequest({
+      tool: "cancel_workflow_run",
+      repository: normalizedRepository,
+      workflowRunId: runId,
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(normalizedRepository, context);
+    const before = await readWorkflowRun(context, normalizedRepository, runId);
+    if (before.status === "completed") {
+      throw new Error(`Workflow run ${runId} is already completed and cannot be cancelled.`);
+    }
+    const operation = await auditedOperation(
+      request,
+      config,
+      () => runGh([
+        "api",
+        `repos/${normalizedRepository}/actions/runs/${runId}/cancel`,
+        "--hostname",
+        context.profile.hostname,
+        "--method",
+        "POST",
+      ], config, context),
+    );
+    return response({
+      cancelled: { runId, repository: normalizedRepository, previousStatus: before.status },
+      audit: operation.audit,
+    });
+  });
+
+  server.registerTool("rerun_workflow_run", {
+    description: "Re-run a completed workflow run in an allowed repository. With failedJobsOnly, only the failed jobs of the latest attempt are re-run.",
+    inputSchema: {
+      ...writeContextSchema,
+      runId: workflowRunIdSchema,
+      failedJobsOnly: z.boolean().default(false),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  }, async ({ account, repository, hostname, runId, failedJobsOnly }) => {
+    const normalizedRepository = repository.trim();
+    const request = await prepareWriteRequest({
+      tool: "rerun_workflow_run",
+      repository: normalizedRepository,
+      workflowRunId: runId,
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(normalizedRepository, context);
+    const before = await readWorkflowRun(context, normalizedRepository, runId);
+    if (before.status !== "completed") {
+      throw new Error(`Workflow run ${runId} has not completed and cannot be re-run yet.`);
+    }
+    const endpoint = failedJobsOnly ? "rerun-failed-jobs" : "rerun";
+    const operation = await auditedOperation(
+      request,
+      config,
+      () => runGh([
+        "api",
+        `repos/${normalizedRepository}/actions/runs/${runId}/${endpoint}`,
+        "--hostname",
+        context.profile.hostname,
+        "--method",
+        "POST",
+      ], config, context),
+    );
+    return response({
+      rerunRequested: {
+        runId,
+        repository: normalizedRepository,
+        failedJobsOnly,
+        previousConclusion: before.conclusion,
+      },
+      audit: operation.audit,
+    });
+  });
+
+  server.registerTool("delete_workflow_run", {
+    description: "Delete a completed workflow run and its logs from an allowed repository. This operation cannot be undone by this MCP server.",
+    inputSchema: { ...writeContextSchema, runId: workflowRunIdSchema },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  }, async ({ account, repository, hostname, runId }) => {
+    const normalizedRepository = repository.trim();
+    const request = await prepareWriteRequest({
+      tool: "delete_workflow_run",
+      repository: normalizedRepository,
+      workflowRunId: runId,
+    }, config, account, hostname);
+    const { context } = request;
+    assertRepositoryAllowed(normalizedRepository, context);
+    const before = await readWorkflowRun(context, normalizedRepository, runId);
+    if (before.status !== "completed") {
+      throw new Error(`Workflow run ${runId} has not completed and cannot be deleted. Cancel it first or wait for completion.`);
+    }
+    const operation = await auditedOperation(
+      request,
+      config,
+      () => runGh([
+        "api",
+        `repos/${normalizedRepository}/actions/runs/${runId}`,
+        "--hostname",
+        context.profile.hostname,
+        "--method",
+        "DELETE",
+      ], config, context),
+    );
+    return response({
+      deleted: { runId, repository: normalizedRepository, name: before.name },
+      audit: operation.audit,
+    });
   });
 }

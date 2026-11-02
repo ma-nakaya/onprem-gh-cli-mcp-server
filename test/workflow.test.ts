@@ -6,8 +6,7 @@ import {
   normalizeWorkflowInputs,
   workflowRunJobs,
   workflowRunLogChunk,
-  workflowSummary,
-} from "../src/workflow.js";
+  workflowSummary, workflowRunState } from "../src/workflow.js";
 
 describe("workflow dispatch validation", () => {
   it("accepts numeric IDs and workflow YAML file names", () => {
@@ -274,5 +273,20 @@ describe("workflow run log byte chunking", () => {
     expect(() => workflowRunLogChunk("abc", -1, 1)).toThrow(/offsetBytes.*greater than or equal to 0/);
     expect(() => workflowRunLogChunk("abc", 0, 0)).toThrow(/limitBytes.*greater than or equal to 1/);
     expect(() => workflowRunLogChunk("abc", 0.5, 1)).toThrow(/offsetBytes.*safe integer/);
+  });
+});
+
+describe("workflowRunState", () => {
+  it("reads status and conclusion from a run response", () => {
+    expect(workflowRunState({ id: 42, status: "completed", conclusion: "failure", name: "CI" }))
+      .toEqual({ id: 42, status: "completed", conclusion: "failure", name: "CI" });
+    expect(workflowRunState({ id: 42, status: "in_progress", conclusion: null }))
+      .toEqual({ id: 42, status: "in_progress", conclusion: null, name: null });
+  });
+
+  it("rejects unexpected run shapes", () => {
+    expect(() => workflowRunState({ id: "42", status: "completed", conclusion: null }))
+      .toThrow(/unexpected workflow run response/);
+    expect(() => workflowRunState(null)).toThrow();
   });
 });
