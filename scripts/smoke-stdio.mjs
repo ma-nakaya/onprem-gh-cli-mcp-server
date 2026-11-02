@@ -18,6 +18,7 @@ const expectedTools = [
   "create_repository",
   "update_repository_description",
   "delete_repository",
+  "update_repository_visibility",
   "list_issues",
   "get_issue",
   "list_issue_comments",
