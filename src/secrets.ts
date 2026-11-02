@@ -31,3 +31,25 @@ export function repositorySecretsPage(
   });
   return { totalCount: item.total_count, secrets };
 }
+
+export interface OrganizationSecretSummary extends RepositorySecretSummary {
+  visibility: string;
+}
+
+export function organizationSecretsPage(
+  value: unknown,
+): { totalCount: number; secrets: OrganizationSecretSummary[] } {
+  const page = repositorySecretsPage(value);
+  const item = objectResponse(value);
+  const rawSecrets = item.secrets as Record<string, unknown>[];
+  return {
+    totalCount: page.totalCount,
+    secrets: page.secrets.map((secret, index) => {
+      const visibility = rawSecrets[index]?.visibility;
+      if (typeof visibility !== "string") {
+        throw new Error("GitHub API returned an unexpected secret entry.");
+      }
+      return { ...secret, visibility };
+    }),
+  };
+}
