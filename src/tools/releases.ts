@@ -5,21 +5,29 @@ import { assertRepositoryAllowed } from "../policy.js";
 import {
   assertDraftRelease,
   assertPublishableRelease,
+  releaseAssetsPage,
   releaseIdentifier,
   releaseSummary,
+  releaseTagName,
 } from "../release.js";
+import { runGh } from "../gh-runner.js";
 import {
+  REPOSITORY_CONTENT_TRUST,
+  auditedOperation,
   auditedJsonGh,
   buildContextSchemas,
   buildSharedSchemas,
   jsonGh,
   prepareWriteRequest,
+  repositorySource,
   response,
+  responseWithinOutputLimit,
+  verifiedRepositoryReadContext,
 } from "../server-support.js";
 
 export function registerReleaseTools(server: McpServer, config: Config): void {
-  const { writeContextSchema } = buildContextSchemas(config);
-  const { gitRefSchema } = buildSharedSchemas();
+  const { repositorySchema, writeContextSchema } = buildContextSchemas(config);
+  const { gitRefSchema, apiPageSchema, apiPerPageSchema } = buildSharedSchemas();
 
 server.registerTool("create_release", {
   description: "Create a draft release in an allowed repository. Use publish_release to publish the draft. The release body is sent through stdin and is not written to the audit log.",
@@ -139,5 +147,149 @@ server.registerTool("publish_release", {
     config,
   );
   return response({ release: releaseSummary(operation.value), audit: operation.audit });
+});
+server.registerTool("delete_release", {
+  description: "Delete a release (draft or published) from an allowed repository. The tag itself is not deleted. This operation cannot be undone by this MCP server.",
+  inputSchema: {
+    ...writeContextSchema,
+    releaseId: z.number().int().positive(),
+  },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+}, async ({ account, repository, hostname, releaseId }) => {
+  const normalizedRepository = repository.trim();
+  const request = await prepareWriteRequest({
+    tool: "delete_release",
+    repository: normalizedRepository,
+    releaseId,
+  }, config, account, hostname);
+  const { context } = request;
+  assertRepositoryAllowed(repository, context);
+  const normalizedHostname = context.profile.hostname;
+  const existing = await jsonGh(
+    ["api", `repos/${normalizedRepository}/releases/${releaseId}`, "--hostname", normalizedHostname],
+    config,
+    context,
+  );
+  const tagName = releaseTagName(existing);
+  const operation = await auditedOperation(
+    request,
+    config,
+    () => runGh([
+      "api",
+      `repos/${normalizedRepository}/releases/${releaseId}`,
+      "--hostname",
+      normalizedHostname,
+      "--method",
+      "DELETE",
+    ], config, context),
+  );
+  return response({
+    deleted: { releaseId, tagName, repository: normalizedRepository },
+    audit: operation.audit,
+  });
+});
+
+server.registerTool("list_release_assets", {
+  description: "List the assets attached to a release in an allowed repository, with their IDs, names, sizes, and download counts.",
+  inputSchema: {
+    ...repositorySchema,
+    releaseId: z.number().int().positive(),
+    page: apiPageSchema,
+    perPage: apiPerPageSchema,
+  },
+  annotations: { readOnlyHint: true, destructiveHint: false },
+}, async ({ account, hostname, repository, releaseId, page, perPage }) => {
+  const readRequest = await verifiedRepositoryReadContext(
+    config,
+    repository,
+    account,
+    hostname,
+  );
+  const value = await jsonGh([
+    "api",
+    `repos/${readRequest.repository}/releases/${releaseId}/assets?per_page=${perPage}&page=${page}`,
+    "--hostname",
+    readRequest.context.profile.hostname,
+  ], config, readRequest.context);
+  const assets = releaseAssetsPage(value);
+  return responseWithinOutputLimit({
+    assets,
+    pagination: { page, perPage, returnedCount: assets.length },
+    source: repositorySource(readRequest.context, readRequest.repository),
+    contentTrust: REPOSITORY_CONTENT_TRUST,
+  }, config);
+});
+
+server.registerTool("upload_release_asset", {
+  description: "Upload a local file as an asset of an existing release in an allowed repository. The asset name is the file base name. The file is read by the local gh CLI; its contents are not included in the response or the audit log.",
+  inputSchema: {
+    ...writeContextSchema,
+    releaseId: z.number().int().positive(),
+    filePath: z.string().trim().min(1).max(1024),
+    clobber: z.boolean().default(false),
+  },
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+}, async ({ account, repository, hostname, releaseId, filePath, clobber }) => {
+  const normalizedRepository = repository.trim();
+  const request = await prepareWriteRequest({
+    tool: "upload_release_asset",
+    repository: normalizedRepository,
+    releaseId,
+  }, config, account, hostname);
+  const { context } = request;
+  assertRepositoryAllowed(repository, context);
+  const normalizedHostname = context.profile.hostname;
+  const existing = await jsonGh(
+    ["api", `repos/${normalizedRepository}/releases/${releaseId}`, "--hostname", normalizedHostname],
+    config,
+    context,
+  );
+  const tagName = releaseTagName(existing);
+  const args = ["release", "upload", tagName, filePath, "--repo", normalizedRepository];
+  if (clobber) args.push("--clobber");
+  const operation = await auditedOperation(
+    request,
+    config,
+    () => runGh(args, config, context),
+  );
+  const name = filePath.split(/[\\/]/).pop() ?? filePath;
+  return response({
+    uploaded: { releaseId, tagName, name, repository: normalizedRepository },
+    audit: operation.audit,
+  });
+});
+
+server.registerTool("delete_release_asset", {
+  description: "Delete one asset from a release in an allowed repository by its asset ID (see list_release_assets). This operation cannot be undone by this MCP server.",
+  inputSchema: {
+    ...writeContextSchema,
+    releaseAssetId: z.number().int().positive(),
+  },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+}, async ({ account, repository, hostname, releaseAssetId }) => {
+  const normalizedRepository = repository.trim();
+  const request = await prepareWriteRequest({
+    tool: "delete_release_asset",
+    repository: normalizedRepository,
+    releaseAssetId,
+  }, config, account, hostname);
+  const { context } = request;
+  assertRepositoryAllowed(repository, context);
+  const operation = await auditedOperation(
+    request,
+    config,
+    () => runGh([
+      "api",
+      `repos/${normalizedRepository}/releases/assets/${releaseAssetId}`,
+      "--hostname",
+      context.profile.hostname,
+      "--method",
+      "DELETE",
+    ], config, context),
+  );
+  return response({
+    deleted: { releaseAssetId, repository: normalizedRepository },
+    audit: operation.audit,
+  });
 });
 }

@@ -654,4 +654,39 @@ describe("repository tree and file read tools", () => {
       await connection.close();
     }
   });
+
+  it("lists release assets with stable metadata", async () => {
+    runGhMock
+      .mockResolvedValueOnce(identity())
+      .mockResolvedValueOnce(ghJson([{
+        id: 7,
+        name: "app.zip",
+        size: 1234,
+        content_type: "application/zip",
+        download_count: 3,
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-02T00:00:00Z",
+      }]));
+    const connection = await connectedClient();
+    try {
+      const result = await connection.client.callTool({
+        name: "list_release_assets",
+        arguments: { repository, releaseId: 99, page: 1, perPage: 30 },
+      });
+      expect(result.isError).not.toBe(true);
+      const parsed = JSON.parse((result.content[0] as { text: string }).text);
+      expect(parsed.assets).toEqual([{
+        id: 7,
+        name: "app.zip",
+        size: 1234,
+        contentType: "application/zip",
+        downloadCount: 3,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-02T00:00:00Z",
+      }]);
+      expect(runGhMock.mock.calls[1]?.[0]?.[1]).toContain("/releases/99/assets?");
+    } finally {
+      await connection.close();
+    }
+  });
 });

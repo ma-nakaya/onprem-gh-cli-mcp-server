@@ -44,7 +44,7 @@ describe("MCP tool registration", () => {
         expect(tools.has(name)).toBe(true);
         expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
       }
-      for (const name of ["create_release", "update_release", "publish_release"]) {
+      for (const name of ["create_release", "update_release", "publish_release", "delete_release"]) {
         expect(tools.has(name)).toBe(true);
         expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
       }
@@ -86,11 +86,14 @@ describe("MCP tool registration", () => {
       expect(tools.get("set_repository_secret")?.annotations?.readOnlyHint).toBe(false);
       expect(tools.get("set_repository_secret")?.annotations?.destructiveHint).toBe(false);
       expect(tools.get("delete_repository_secret")?.annotations?.destructiveHint).toBe(true);
+      expect(tools.get("delete_release")?.annotations?.destructiveHint).toBe(true);
+      expect(tools.get("list_release_assets")?.annotations?.readOnlyHint).toBe(true);
+      expect(tools.get("upload_release_asset")?.annotations?.readOnlyHint).toBe(false);
+      expect(tools.get("delete_release_asset")?.annotations?.destructiveHint).toBe(true);
       for (const name of ["rename_repository", "set_repository_archived", "transfer_repository", "delete_branch"]) {
         expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
         expect(tools.get(name)?.annotations?.destructiveHint).toBe(true);
       }
-      expect(tools.has("delete_release")).toBe(false);
       expect(tools.has("dispatch_workflow")).toBe(true);
       expect(tools.get("dispatch_workflow")?.annotations?.readOnlyHint).toBe(false);
       expect(tools.get("dispatch_workflow")?.annotations?.destructiveHint).toBe(true);
