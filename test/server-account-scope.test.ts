@@ -665,6 +665,128 @@ describe("MCP account and resource isolation", () => {
     }
   });
 
+  it("cancels a workflow run that has not completed", async () => {
+    const calls: string[][] = [];
+    runGhMock.mockImplementation(async (args) => {
+      calls.push(args);
+      if (args[1] === "user") {
+        return { exitCode: 0, stdout: "masa-nakaya\n", stderr: "" };
+      }
+      if (args[1] === "repos/masa-nakaya/example/actions/runs/42" && !args.includes("--method")) {
+        return { exitCode: 0, stdout: JSON.stringify({ id: 42, status: "in_progress", conclusion: null, name: "CI" }), stderr: "" };
+      }
+      if (args[1] === "repos/masa-nakaya/example/actions/runs/42/cancel" && args.includes("POST")) {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      throw new Error(`Unexpected gh endpoint in test: ${args[1] ?? ""}`);
+    });
+    const connection = await connectedClient(accountConfig());
+
+    try {
+      const result = await connection.client.callTool({
+        name: "cancel_workflow_run",
+        arguments: { repository: "masa-nakaya/example", runId: 42 },
+      });
+
+      expect(result.isError).not.toBe(true);
+      expect(appendAuditRecordMock.mock.calls.at(-1)?.[1]).toMatchObject({
+        tool: "cancel_workflow_run",
+        outcome: "succeeded",
+        workflowRunId: 42,
+      });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses to cancel a completed workflow run", async () => {
+    runGhMock.mockImplementation(async (args) => {
+      if (args[1] === "user") {
+        return { exitCode: 0, stdout: "masa-nakaya\n", stderr: "" };
+      }
+      if (args[1] === "repos/masa-nakaya/example/actions/runs/42" && !args.includes("--method")) {
+        return { exitCode: 0, stdout: JSON.stringify({ id: 42, status: "completed", conclusion: "success", name: "CI" }), stderr: "" };
+      }
+      throw new Error(`Unexpected gh endpoint in test: ${args[1] ?? ""}`);
+    });
+    const connection = await connectedClient(accountConfig());
+
+    try {
+      const result = await connection.client.callTool({
+        name: "cancel_workflow_run",
+        arguments: { repository: "masa-nakaya/example", runId: 42 },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toMatch(/already completed/);
+      expect(runGhMock.mock.calls.some(([args]) => (args[1] ?? "").endsWith("/cancel"))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("re-runs only failed jobs when failedJobsOnly is set", async () => {
+    let rerunEndpoint = "";
+    runGhMock.mockImplementation(async (args) => {
+      if (args[1] === "user") {
+        return { exitCode: 0, stdout: "masa-nakaya\n", stderr: "" };
+      }
+      if (args[1] === "repos/masa-nakaya/example/actions/runs/42" && !args.includes("--method")) {
+        return { exitCode: 0, stdout: JSON.stringify({ id: 42, status: "completed", conclusion: "failure", name: "CI" }), stderr: "" };
+      }
+      if ((args[1] ?? "").includes("/rerun")) {
+        rerunEndpoint = args[1];
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      throw new Error(`Unexpected gh endpoint in test: ${args[1] ?? ""}`);
+    });
+    const connection = await connectedClient(accountConfig());
+
+    try {
+      const result = await connection.client.callTool({
+        name: "rerun_workflow_run",
+        arguments: { repository: "masa-nakaya/example", runId: 42, failedJobsOnly: true },
+      });
+
+      expect(result.isError).not.toBe(true);
+      expect(rerunEndpoint).toBe("repos/masa-nakaya/example/actions/runs/42/rerun-failed-jobs");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("deletes a completed workflow run", async () => {
+    runGhMock.mockImplementation(async (args) => {
+      if (args[1] === "user") {
+        return { exitCode: 0, stdout: "masa-nakaya\n", stderr: "" };
+      }
+      if (args[1] === "repos/masa-nakaya/example/actions/runs/42" && !args.includes("--method")) {
+        return { exitCode: 0, stdout: JSON.stringify({ id: 42, status: "completed", conclusion: "success", name: "CI" }), stderr: "" };
+      }
+      if (args[1] === "repos/masa-nakaya/example/actions/runs/42" && args.includes("DELETE")) {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      throw new Error(`Unexpected gh endpoint in test: ${args[1] ?? ""}`);
+    });
+    const connection = await connectedClient(accountConfig());
+
+    try {
+      const result = await connection.client.callTool({
+        name: "delete_workflow_run",
+        arguments: { repository: "masa-nakaya/example", runId: 42 },
+      });
+
+      expect(result.isError).not.toBe(true);
+      expect(appendAuditRecordMock.mock.calls.at(-1)?.[1]).toMatchObject({
+        tool: "delete_workflow_run",
+        outcome: "succeeded",
+        workflowRunId: 42,
+      });
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("audits a GraphQL mutation rejected through top-level errors as failed", async () => {
     runGhMock.mockImplementation(async (args) => {
       if (args[1] === "user") {
