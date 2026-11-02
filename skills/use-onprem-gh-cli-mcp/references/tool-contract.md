@@ -30,6 +30,11 @@ The names below are the MCP server's bare tool names. A client may display a wra
 - `create_repository`
 - `update_repository_description`
 - `delete_repository`
+- `update_repository_visibility`
+- `publish_release`
+- `list_repository_secrets`
+- `set_repository_secret`
+- `delete_repository_secret`
 - `get_branch`
 - `list_repository_tree`
 - `get_repository_file`
@@ -41,6 +46,8 @@ Key arguments and limits:
 - `create_repository`: `owner`, `name`, optional `description`, `visibility`, `initializeWithReadme`, and `hasIssues`. Visibility defaults to `private`; require an explicit request for `public` or `internal`.
 - `update_repository_description`: require the stable numeric repository ID returned by `get_repository`.
 - `delete_repository`: require `expectedRepositoryId` and `confirmRepository` equal to the freshly read canonical `owner/name`. Deletion is permanent through this server.
+- `update_repository_visibility`: require the same `expectedRepositoryId` and `confirmRepository` confirmation as `delete_repository`. A change to the current visibility is refused.
+- `set_repository_secret` / `delete_repository_secret`: repository Actions secrets only. The value is passed to `gh` through stdin only and must never be echoed, logged, or included in arguments or responses; only the secret name is audited.
 - `list_repository_tree`: `ref`, optional `path`, `recursive`, `offset` 0-1,000,000, and `limit` 1-100 (default 100). Recursive Git Trees results can be truncated; traverse subtrees non-recursively for complete coverage.
 - `get_repository_file`: `ref`, `path`, `format` (`utf8` or `base64`), `offsetBytes`, and `limitBytes` up to 131,072. Follow `nextOffsetBytes`; committed blobs are limited to 100 MiB. Symlinks, submodules, and Git LFS objects are not followed.
 - `create_branch`: `branch` and optional `sourceBranch` (default `main`); existing refs are not overwritten.
@@ -113,8 +120,9 @@ Key arguments and limits:
 
 - `create_release`
 - `update_release`
+- `publish_release`
 
-`create_release` always creates a Draft Release. It accepts `tagName`, optional `targetCommitish`, name up to 256 characters, body up to 125,000 characters, `prerelease`, and `generateReleaseNotes`. `update_release` changes Draft metadata only. Publication, deletion, and asset mutation are unsupported.
+`create_release` always creates a Draft Release. It accepts `tagName`, optional `targetCommitish`, name up to 256 characters, body up to 125,000 characters, `prerelease`, and `generateReleaseNotes`. `update_release` changes Draft metadata only. `publish_release` publishes an existing Draft Release (optionally setting `prerelease`); publication cannot be undone through this server. Deletion and asset mutation are unsupported.
 
 ### Labels and milestones
 
@@ -152,13 +160,13 @@ Pass `args` as an array, never as a shell command. It is allowlisted and read-on
 
 The server does not support:
 
-- Renaming, transferring, archiving, or changing visibility of an existing repository.
+- Renaming, transferring, or archiving an existing repository.
 - Force push or direct file commits to common default branch names.
 - Deleting branches, releases, workflow runs, labels, milestones, Projects, or Project items.
-- Publishing releases or mutating release assets.
+- Mutating release assets.
 - Cancelling or rerunning workflows.
 - Changing Project visibility, mutating Project field schemas, or creating Draft Project items.
-- Mutating secrets, tokens, credentials, rulesets, environments, teams, or organization membership.
+- Mutating tokens or credentials, organization or environment secrets, rulesets, environments, teams, or organization membership. Repository Actions secrets are supported only through the dedicated secret tools above.
 - Arbitrary write commands through `run_gh`.
 
 Do not substitute a generic command, another account, or another integration to cross these boundaries. Treat permanent repository or inline-comment deletion, workflow dispatch, commit creation, and pull-request merge as high-impact operations. Never retry a non-idempotent or ambiguously completed write without first reading current state and proving that the prior effect did not occur.

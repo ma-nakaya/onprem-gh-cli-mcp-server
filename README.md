@@ -1,9 +1,9 @@
 # onprem-gh-cli-mcp-server
 
-オンプレミスのPCにインストールされた GitHub CLI（`gh`）を、MCP クライアントから安全に利用するための stdio MCP サーバーです。GitHub の認証情報を MCP クライアントへ渡さず、ローカルの `gh auth` 認証をそのまま使います。読み取り、Issue／Pull Request の型付き書き込み、レビュー会話、確認付きの Repository 管理、Pull Request のマージ、GitHub Projects v2 操作までを、66 個の型付きツールとして提供します。
+オンプレミスのPCにインストールされた GitHub CLI（`gh`）を、MCP クライアントから安全に利用するための stdio MCP サーバーです。GitHub の認証情報を MCP クライアントへ渡さず、ローカルの `gh auth` 認証をそのまま使います。読み取り、Issue／Pull Request の型付き書き込み、レビュー会話、確認付きの Repository 管理、Pull Request のマージ、GitHub Projects v2 操作、Release の公開、Repository の公開状態変更、Repository Secret の管理までを、71 個の型付きツールとして提供します。
 
 > [!IMPORTANT]
-> 現在は Phase 3b です。1 つの MCP プロセスから複数の GitHub CLI 認証を明示的に選択できます。Secret の変更、既存 Repository の公開状態変更、Release の公開などは提供しません（「セキュリティと制約」参照）。
+> 現在は Phase 4b です。1 つの MCP プロセスから複数の GitHub CLI 認証を明示的に選択できます。Release の公開、既存 Repository の公開状態変更、Repository Secret の変更も提供します。Release の削除、Repository の rename／archive／transfer などは提供しません（「セキュリティと制約」参照）。
 
 ## 特徴
 
@@ -118,15 +118,25 @@ Issue 本文とコメントはコマンドライン引数へ載せず、`gh api 
 - `create_repository`: 明示的に許可された User／Organization 配下へ Repository を作成（既定の visibility は `private`）
 - `update_repository_description`: `get_repository` が返した stable Repository ID 一致時だけ説明を更新・消去
 - `delete_repository`: stable Repository ID と canonical `owner/name` の二重確認後に完全削除
+- `update_repository_visibility`: 削除と同じ二重確認のうえで visibility（`public`／`private`／`internal`）を変更。現在の visibility と同じ値への変更は拒否
 
-Owner-wide な作成には `allowedOwners` への明示設定が必要です。説明は標準入力で渡し、監査ログへ保存しません。`create_repository` と `delete_repository` は `destructiveHint: true` です。削除はこの MCP から取り消せません。既存 Repository の rename、visibility 変更、archive、transfer は提供しません。
+Owner-wide な作成には `allowedOwners` への明示設定が必要です。説明は標準入力で渡し、監査ログへ保存しません。`create_repository`、`delete_repository`、`update_repository_visibility` は `destructiveHint: true` です。削除はこの MCP から取り消せません。既存 Repository の rename、archive、transfer は提供しません。
 
-### Draft Release 書き込み
+### Release 書き込み
 
 - `create_release`: Release を常に Draft として作成
 - `update_release`: 既存の Draft Release だけを更新
+- `publish_release`: 既存の Draft Release だけを公開（任意で `prerelease` を同時指定）
 
-Release 本文は標準入力で渡し、監査ログへ保存しません。公開済み Release の変更、Draft の公開、削除、Asset 操作は提供しません。
+Release 本文は標準入力で渡し、監査ログへ保存しません。公開済み Release の変更、削除、Asset 操作は提供しません。公開はこの MCP から取り消せません。
+
+### Repository Secret
+
+- `list_repository_secrets`: Actions Secret の名前と作成／更新日時を一覧（値は API からも返りません）
+- `set_repository_secret`: Secret を作成・更新。値は標準入力でのみ `gh` へ渡し、プロセス引数・監査ログ・レスポンスのいずれにも含めません（監査には名前だけを記録）
+- `delete_repository_secret`: Secret を削除
+
+名前は GitHub の規則（英字／アンダースコアで開始し英数字とアンダースコアのみ、`GITHUB_` 接頭辞は禁止）で検証します。対象は Repository の Actions Secret のみで、Organization／Environment の Secret は提供しません。
 
 ### Workflow Dispatch
 
@@ -230,16 +240,16 @@ manifest はリポジトリ外へ置く、次のような非秘密 JSON です�
 - `shell: false` で `gh` を直接起動し、`gh auth token` と `--show-token` を拒否します
 - `run_gh` では書き込み系サブコマンドを拒否し、リソース許可リスト設定時は `auth status` 以外も拒否します
 - 書き込み操作は入力スキーマを持つ専用ツールだけに限定します
-- 本文・コメント・説明・GraphQL query など、内容を含む入力は標準入力で渡し、プロセス引数と監査ログへ載せません
+- 本文・コメント・説明・GraphQL query・Secret の値など、内容を含む入力は標準入力で渡し、プロセス引数と監査ログへ載せません
 - 実行時間と出力量を制限し、GitHub CLI の通常出力に現れた Token らしい文字列をマスクします（byte 正確性が必要な `get_repository_file` の Repository 本文を除く）
 - 周囲の環境にある GitHub Token、`GH_CONFIG_DIR`、`GH_HOST` を子プロセスへ継承しません
 - 選択した account の期待 login を操作前に検証し、別 account へ書き込みを fallback しません
 
-提供しない操作: Release の公開・削除・Asset 操作、Workflow の再実行・キャンセル・Run 削除、Label／Milestone の削除、Project の公開状態変更・削除、Item の削除、Field 定義の変更、Draft Item の作成、Secret の変更、既存 Repository の rename・visibility 変更・archive・transfer、外部承認システムによる二段階承認。
+提供しない操作: Release の削除・Asset 操作、Workflow の再実行・キャンセル・Run 削除、Label／Milestone の削除、Project の公開状態変更・削除、Item の削除、Field 定義の変更、Draft Item の作成、Organization／Environment の Secret 変更、既存 Repository の rename・archive・transfer、外部承認システムによる二段階承認。
 
 ## 実装範囲
 
-Phase 1（基盤・読み取り・許可リスト）から Phase 2a〜2f（Issue、Pull Request、Draft Release、Workflow Dispatch、Label／Milestone、Projects v2 の書き込み）、Phase 3a（複数アカウント選択）、Phase 3b（レビュー会話・SHA 固定マージ・Repository 管理・Label 割り当て）、Phase 4a（stdio 接続とスモークテスト）までを実装済みです。
+Phase 1（基盤・読み取り・許可リスト）から Phase 2a〜2f（Issue、Pull Request、Draft Release、Workflow Dispatch、Label／Milestone、Projects v2 の書き込み）、Phase 3a（複数アカウント選択）、Phase 3b（レビュー会話・SHA 固定マージ・Repository 管理・Label 割り当て）、Phase 4a（stdio 接続とスモークテスト）、Phase 4b（Release 公開・Repository 公開状態変更・Repository Secret の一覧／設定／削除）までを実装済みです。Phase 4b の3機能は当初セキュリティ方針として意図的に未実装としていましたが、2026年11月2日に本人の指示で解禁しました。各機能とも既存の歯止め（許可リスト、監査、強い確認、値の非記録）をそのまま適用しています。
 
 ## 開発
 
