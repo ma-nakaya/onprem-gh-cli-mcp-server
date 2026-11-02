@@ -371,6 +371,177 @@ server.registerTool("update_repository_visibility", {
   });
 });
 
+server.registerTool("rename_repository", {
+  description: "Rename an allowed repository. Both its stable numeric ID and canonical owner/name confirmation are required, as for delete_repository. GitHub redirects the old name, but external references should be updated.",
+  inputSchema: {
+    ...writeContextSchema,
+    newName: repositoryNameSchema,
+    expectedRepositoryId: repositoryIdSchema,
+    confirmRepository: z.string().trim().min(3).max(201)
+      .describe("Repeat the canonical owner/name returned by get_repository"),
+  },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+}, async ({ account, hostname, repository, newName, expectedRepositoryId, confirmRepository }) => {
+  const normalizedRepository = repository.trim();
+  const request = await prepareWriteRequest({
+    tool: "rename_repository",
+    repository: normalizedRepository,
+    repositoryId: expectedRepositoryId,
+  }, config, account, hostname);
+  const { context } = request;
+  assertRepositoryAllowed(normalizedRepository, context);
+  const before = await resolveRepositoryDetails(config, context, normalizedRepository);
+  assertRepositoryIdentity(before, normalizedRepository, expectedRepositoryId);
+  if (confirmRepository.trim().toLowerCase() !== before.fullName.toLowerCase()) {
+    throw new Error(
+      `confirmRepository must exactly identify ${before.fullName}; refusing repository rename.`,
+    );
+  }
+  if (before.name === newName) {
+    throw new Error(`Repository ${before.fullName} already has the name ${newName}.`);
+  }
+  const operation = await auditedJsonGh(
+    request,
+    ["api", `repos/${before.fullName}`, "--hostname", context.profile.hostname, "--method", "PATCH", "--input", "-", "--jq", REPOSITORY_DETAILS_JQ],
+    { name: newName },
+    config,
+  );
+  return response({
+    repository: repositoryDetails(operation.value),
+    previousFullName: before.fullName,
+    audit: operation.audit,
+  });
+});
+
+server.registerTool("set_repository_archived", {
+  description: "Archive or unarchive an allowed repository. The stable numeric repository ID is required. Archiving makes the repository read-only; unarchiving restores it.",
+  inputSchema: {
+    ...writeContextSchema,
+    archived: z.boolean(),
+    expectedRepositoryId: repositoryIdSchema,
+  },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+}, async ({ account, hostname, repository, archived, expectedRepositoryId }) => {
+  const normalizedRepository = repository.trim();
+  const request = await prepareWriteRequest({
+    tool: "set_repository_archived",
+    repository: normalizedRepository,
+    repositoryId: expectedRepositoryId,
+  }, config, account, hostname);
+  const { context } = request;
+  assertRepositoryAllowed(normalizedRepository, context);
+  const before = await resolveRepositoryDetails(config, context, normalizedRepository);
+  assertRepositoryIdentity(before, normalizedRepository, expectedRepositoryId);
+  if (before.isArchived === archived) {
+    throw new Error(
+      `Repository ${before.fullName} is already ${archived ? "archived" : "not archived"}.`,
+    );
+  }
+  const operation = await auditedJsonGh(
+    request,
+    ["api", `repos/${before.fullName}`, "--hostname", context.profile.hostname, "--method", "PATCH", "--input", "-", "--jq", REPOSITORY_DETAILS_JQ],
+    { archived },
+    config,
+  );
+  return response({
+    repository: repositoryDetails(operation.value),
+    previousArchived: before.isArchived,
+    audit: operation.audit,
+  });
+});
+
+server.registerTool("transfer_repository", {
+  description: "Transfer an allowed repository to another user or organization. Both its stable numeric ID and canonical owner/name confirmation are required, as for delete_repository. Depending on the destination, the transfer may stay pending until the new owner accepts it.",
+  inputSchema: {
+    ...writeContextSchema,
+    newOwner: ownerLoginSchema,
+    expectedRepositoryId: repositoryIdSchema,
+    confirmRepository: z.string().trim().min(3).max(201)
+      .describe("Repeat the canonical owner/name returned by get_repository"),
+  },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+}, async ({ account, hostname, repository, newOwner, expectedRepositoryId, confirmRepository }) => {
+  const normalizedRepository = repository.trim();
+  const request = await prepareWriteRequest({
+    tool: "transfer_repository",
+    repository: normalizedRepository,
+    repositoryId: expectedRepositoryId,
+  }, config, account, hostname);
+  const { context } = request;
+  assertRepositoryAllowed(normalizedRepository, context);
+  const before = await resolveRepositoryDetails(config, context, normalizedRepository);
+  assertRepositoryIdentity(before, normalizedRepository, expectedRepositoryId);
+  if (confirmRepository.trim().toLowerCase() !== before.fullName.toLowerCase()) {
+    throw new Error(
+      `confirmRepository must exactly identify ${before.fullName}; refusing repository transfer.`,
+    );
+  }
+  if (before.owner.login.toLowerCase() === newOwner.toLowerCase()) {
+    throw new Error(`Repository ${before.fullName} already belongs to ${newOwner}.`);
+  }
+  const operation = await auditedJsonGh(
+    request,
+    ["api", `repos/${before.fullName}/transfer`, "--hostname", context.profile.hostname, "--method", "POST", "--input", "-"],
+    { new_owner: newOwner },
+    config,
+  );
+  return response({
+    transferred: { repository: before.fullName, newOwner },
+    audit: operation.audit,
+  });
+});
+
+server.registerTool("delete_branch", {
+  description: "Delete a branch from an allowed repository. The current head SHA must match expectedHeadSha, and the repository default branch cannot be deleted.",
+  inputSchema: {
+    ...writeContextSchema,
+    branch: branchNameSchema,
+    expectedHeadSha: commitShaSchema,
+  },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+}, async ({ account, hostname, repository, branch, expectedHeadSha }) => {
+  const normalizedRepository = repository.trim();
+  const normalizedBranch = branch.trim();
+  const request = await prepareWriteRequest({
+    tool: "delete_branch",
+    repository: normalizedRepository,
+    branch: normalizedBranch,
+    commitSha: expectedHeadSha,
+  }, config, account, hostname);
+  const { context } = request;
+  assertRepositoryAllowed(normalizedRepository, context);
+  const normalizedHostname = context.profile.hostname;
+  const details = await resolveRepositoryDetails(config, context, normalizedRepository);
+  if (details.defaultBranch === normalizedBranch) {
+    throw new Error(`The default branch ${normalizedBranch} cannot be deleted.`);
+  }
+  const currentRef = await jsonGh(
+    ["api", `repos/${normalizedRepository}/git/ref/heads/${encodeGitRef(normalizedBranch)}`, "--hostname", normalizedHostname],
+    config,
+    context,
+  );
+  const actualHeadSha = branchHeadSha(currentRef);
+  if (actualHeadSha !== expectedHeadSha) {
+    throw new Error("Branch head changed. Fetch the branch again before deleting it.");
+  }
+  const operation = await auditedOperation(
+    request,
+    config,
+    () => runGh([
+      "api",
+      `repos/${normalizedRepository}/git/refs/heads/${encodeGitRef(normalizedBranch)}`,
+      "--hostname",
+      normalizedHostname,
+      "--method",
+      "DELETE",
+    ], config, context),
+  );
+  return response({
+    deleted: { repository: normalizedRepository, branch: normalizedBranch, headSha: expectedHeadSha },
+    audit: operation.audit,
+  });
+});
+
 server.registerTool("get_branch", {
   description: "Read the current commit SHA for a branch in an allowed repository.",
   inputSchema: { ...writeContextSchema, branch: branchNameSchema },

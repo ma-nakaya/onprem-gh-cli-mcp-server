@@ -86,6 +86,10 @@ describe("MCP tool registration", () => {
       expect(tools.get("set_repository_secret")?.annotations?.readOnlyHint).toBe(false);
       expect(tools.get("set_repository_secret")?.annotations?.destructiveHint).toBe(false);
       expect(tools.get("delete_repository_secret")?.annotations?.destructiveHint).toBe(true);
+      for (const name of ["rename_repository", "set_repository_archived", "transfer_repository", "delete_branch"]) {
+        expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
+        expect(tools.get(name)?.annotations?.destructiveHint).toBe(true);
+      }
       expect(tools.has("delete_release")).toBe(false);
       expect(tools.has("dispatch_workflow")).toBe(true);
       expect(tools.get("dispatch_workflow")?.annotations?.readOnlyHint).toBe(false);

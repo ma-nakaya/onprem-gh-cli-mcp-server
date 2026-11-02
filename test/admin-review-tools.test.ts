@@ -830,4 +830,138 @@ describe("review and administration MCP tools", () => {
       await connection.close();
     }
   });
+
+  it("renames a repository only after ID and owner/name confirmation match", async () => {
+    runGhMock
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(repositoryDetails()))
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(repositoryDetails({ fullName: "ma-nakaya/renamed", name: "renamed" })));
+    const connection = await connectedClient();
+    try {
+      const toolResult = await connection.client.callTool({
+        name: "rename_repository",
+        arguments: { repository, newName: "renamed", expectedRepositoryId: 123, confirmRepository: repository },
+      });
+      expect(toolResult.isError).not.toBe(true);
+      expect(stdinPayload(3)).toEqual({ name: "renamed" });
+      const parsed = JSON.parse((toolResult.content[0] as { text: string }).text);
+      expect(parsed.repository.fullName).toBe("ma-nakaya/renamed");
+      expect(parsed.previousFullName).toBe(repository);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("archives a repository and reports the previous state", async () => {
+    runGhMock
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(repositoryDetails()))
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(repositoryDetails({ isArchived: true })));
+    const connection = await connectedClient();
+    try {
+      const toolResult = await connection.client.callTool({
+        name: "set_repository_archived",
+        arguments: { repository, archived: true, expectedRepositoryId: 123 },
+      });
+      expect(toolResult.isError).not.toBe(true);
+      expect(stdinPayload(3)).toEqual({ archived: true });
+      const parsed = JSON.parse((toolResult.content[0] as { text: string }).text);
+      expect(parsed.repository.isArchived).toBe(true);
+      expect(parsed.previousArchived).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses to archive a repository that is already archived", async () => {
+    runGhMock
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(repositoryDetails({ isArchived: true })));
+    const connection = await connectedClient();
+    try {
+      const toolResult = await connection.client.callTool({
+        name: "set_repository_archived",
+        arguments: { repository, archived: true, expectedRepositoryId: 123 },
+      });
+      expect(toolResult.isError).toBe(true);
+      expect(JSON.stringify(toolResult.content)).toMatch(/already archived/);
+      expect(runGhMock).toHaveBeenCalledTimes(2);
+      expect(appendAuditRecordMock).not.toHaveBeenCalled();
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("transfers a repository after ID and owner/name confirmation match", async () => {
+    runGhMock
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(repositoryDetails()))
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(""));
+    const connection = await connectedClient();
+    try {
+      const toolResult = await connection.client.callTool({
+        name: "transfer_repository",
+        arguments: { repository, newOwner: "other-owner", expectedRepositoryId: 123, confirmRepository: repository },
+      });
+      expect(toolResult.isError).not.toBe(true);
+      expect(runGhMock.mock.calls[3]?.[0]).toContain(`repos/${repository}/transfer`);
+      expect(stdinPayload(3)).toEqual({ new_owner: "other-owner" });
+      expect(appendAuditRecordMock.mock.calls[1]?.[1]).toMatchObject({
+        tool: "transfer_repository",
+        repository,
+        repositoryId: 123,
+        outcome: "succeeded",
+      });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("deletes a branch only when the head SHA matches and it is not the default branch", async () => {
+    runGhMock
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(repositoryDetails()))
+      .mockResolvedValueOnce(result({ object: { sha: headSha } }))
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(""));
+    const connection = await connectedClient();
+    try {
+      const toolResult = await connection.client.callTool({
+        name: "delete_branch",
+        arguments: { repository, branch: "agent/change", expectedHeadSha: headSha },
+      });
+      expect(toolResult.isError).not.toBe(true);
+      expect(runGhMock.mock.calls[4]?.[0]).toContain(`repos/${repository}/git/refs/heads/agent/change`);
+      expect(runGhMock.mock.calls[4]?.[0]).toContain("DELETE");
+      expect(appendAuditRecordMock.mock.calls[1]?.[1]).toMatchObject({
+        tool: "delete_branch",
+        branch: "agent/change",
+        commitSha: headSha,
+        outcome: "succeeded",
+      });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses to delete the default branch", async () => {
+    runGhMock
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(repositoryDetails()));
+    const connection = await connectedClient();
+    try {
+      const toolResult = await connection.client.callTool({
+        name: "delete_branch",
+        arguments: { repository, branch: "main", expectedHeadSha: headSha },
+      });
+      expect(toolResult.isError).toBe(true);
+      expect(JSON.stringify(toolResult.content)).toMatch(/default branch/);
+      expect(runGhMock).toHaveBeenCalledTimes(2);
+    } finally {
+      await connection.close();
+    }
+  });
 });
