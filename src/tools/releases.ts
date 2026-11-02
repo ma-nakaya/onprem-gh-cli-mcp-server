@@ -4,6 +4,7 @@ import type { Config } from "../config.js";
 import { assertRepositoryAllowed } from "../policy.js";
 import {
   assertDraftRelease,
+  assertPublishableRelease,
   releaseIdentifier,
   releaseSummary,
 } from "../release.js";
@@ -21,7 +22,7 @@ export function registerReleaseTools(server: McpServer, config: Config): void {
   const { gitRefSchema } = buildSharedSchemas();
 
 server.registerTool("create_release", {
-  description: "Create a draft release in an allowed repository. This tool cannot publish a release. The release body is sent through stdin and is not written to the audit log.",
+  description: "Create a draft release in an allowed repository. Use publish_release to publish the draft. The release body is sent through stdin and is not written to the audit log.",
   inputSchema: {
     ...writeContextSchema,
     tagName: gitRefSchema.describe("Git tag name for the draft release"),
@@ -61,7 +62,7 @@ server.registerTool("create_release", {
 });
 
 server.registerTool("update_release", {
-  description: "Update metadata for an existing draft release. Published releases cannot be changed or published by this tool.",
+  description: "Update metadata for an existing draft release. Published releases cannot be changed by this tool; use publish_release to publish a draft.",
   inputSchema: {
     ...writeContextSchema,
     releaseId: z.number().int().positive(),
@@ -97,6 +98,40 @@ server.registerTool("update_release", {
     context,
   );
   assertDraftRelease(existing, releaseId);
+  const operation = await auditedJsonGh(
+    request,
+    ["api", `repos/${normalizedRepository}/releases/${releaseId}`, "--hostname", normalizedHostname, "--method", "PATCH", "--input", "-"],
+    payload,
+    config,
+  );
+  return response({ release: releaseSummary(operation.value), audit: operation.audit });
+});
+server.registerTool("publish_release", {
+  description: "Publish an existing draft release in an allowed repository. Only draft releases can be published. This server cannot unpublish a release afterwards.",
+  inputSchema: {
+    ...writeContextSchema,
+    releaseId: z.number().int().positive(),
+    prerelease: z.boolean().optional(),
+  },
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+}, async ({ account, repository, hostname, releaseId, prerelease }) => {
+  const normalizedRepository = repository.trim();
+  const request = await prepareWriteRequest({
+    tool: "publish_release",
+    repository: normalizedRepository,
+    releaseId,
+  }, config, account, hostname);
+  const { context } = request;
+  assertRepositoryAllowed(repository, context);
+  const normalizedHostname = context.profile.hostname;
+  const existing = await jsonGh(
+    ["api", `repos/${normalizedRepository}/releases/${releaseId}`, "--hostname", normalizedHostname],
+    config,
+    context,
+  );
+  assertPublishableRelease(existing, releaseId);
+  const payload: Record<string, unknown> = { draft: false };
+  if (prerelease !== undefined) payload.prerelease = prerelease;
   const operation = await auditedJsonGh(
     request,
     ["api", `repos/${normalizedRepository}/releases/${releaseId}`, "--hostname", normalizedHostname, "--method", "PATCH", "--input", "-"],

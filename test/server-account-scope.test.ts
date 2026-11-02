@@ -475,6 +475,88 @@ describe("MCP account and resource isolation", () => {
     }
   });
 
+  it("publishes a draft release with a draft=false PATCH and audits the mutation", async () => {
+    runGhMock.mockImplementation(async (args, _config, _context, options) => {
+      if (args[1] === "user") {
+        return { exitCode: 0, stdout: "masa-nakaya\n", stderr: "" };
+      }
+      if (args[1] === "repos/masa-nakaya/example/releases/99" && !args.includes("--method")) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({ id: 99, draft: true, tag_name: "v1.0.0", prerelease: false }),
+          stderr: "",
+        };
+      }
+      if (args[1] === "repos/masa-nakaya/example/releases/99" && args.includes("PATCH")) {
+        expect(JSON.parse(options?.stdin ?? "{}")).toEqual({ draft: false });
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            id: 99,
+            draft: false,
+            tag_name: "v1.0.0",
+            name: null,
+            prerelease: false,
+            target_commitish: "main",
+            html_url: "https://github.com/masa-nakaya/example/releases/tag/v1.0.0",
+            created_at: "2026-07-22T04:00:00Z",
+            published_at: "2026-07-22T05:00:00Z",
+          }),
+          stderr: "",
+        };
+      }
+      throw new Error(`Unexpected gh endpoint in test: ${args[1] ?? ""}`);
+    });
+    const connection = await connectedClient(accountConfig());
+
+    try {
+      const result = await connection.client.callTool({
+        name: "publish_release",
+        arguments: { repository: "masa-nakaya/example", releaseId: 99 },
+      });
+
+      expect(result.isError).not.toBe(true);
+      const text = (result.content[0] as { text: string }).text;
+      expect(JSON.parse(text).release.isDraft).toBe(false);
+      const started = appendAuditRecordMock.mock.calls[0]?.[1];
+      const succeeded = appendAuditRecordMock.mock.calls.at(-1)?.[1];
+      expect(started).toMatchObject({ tool: "publish_release", outcome: "started", releaseId: 99 });
+      expect(succeeded).toMatchObject({ tool: "publish_release", outcome: "succeeded", releaseId: 99 });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses to publish a release that is not a draft and sends no PATCH", async () => {
+    runGhMock.mockImplementation(async (args) => {
+      if (args[1] === "user") {
+        return { exitCode: 0, stdout: "masa-nakaya\n", stderr: "" };
+      }
+      if (args[1] === "repos/masa-nakaya/example/releases/99" && !args.includes("--method")) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({ id: 99, draft: false, tag_name: "v1.0.0" }),
+          stderr: "",
+        };
+      }
+      throw new Error(`Unexpected gh endpoint in test: ${args[1] ?? ""}`);
+    });
+    const connection = await connectedClient(accountConfig());
+
+    try {
+      const result = await connection.client.callTool({
+        name: "publish_release",
+        arguments: { repository: "masa-nakaya/example", releaseId: 99 },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toMatch(/not a draft/i);
+      expect(runGhMock.mock.calls.some(([args]) => args.includes("PATCH"))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("audits a GraphQL mutation rejected through top-level errors as failed", async () => {
     runGhMock.mockImplementation(async (args) => {
       if (args[1] === "user") {

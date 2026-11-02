@@ -34,3 +34,10 @@ export function assertDraftRelease(value: unknown, releaseId: number): void {
     throw new Error(`Release ${releaseId} is not a draft. Published releases cannot be changed by this tool.`);
   }
 }
+
+export function assertPublishableRelease(value: unknown, releaseId: number): void {
+  const item = objectResponse(value);
+  if (item.draft !== true) {
+    throw new Error(`Release ${releaseId} is not a draft. Only draft releases can be published.`);
+  }
+}
