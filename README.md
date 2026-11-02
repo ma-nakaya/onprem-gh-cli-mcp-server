@@ -2,9 +2,6 @@
 
 オンプレミスのPCにインストールされた GitHub CLI（`gh`）を、MCP クライアントから安全に利用するための stdio MCP サーバーです。GitHub の認証情報を MCP クライアントへ渡さず、ローカルの `gh auth` 認証をそのまま使います。読み取り、Issue／Pull Request の型付き書き込み、レビュー会話、確認付きの Repository 管理、Pull Request のマージ、GitHub Projects v2 操作、Release の公開・削除と Asset 操作、Repository の公開状態変更・rename・archive・transfer、ブランチ削除、Workflow Run のキャンセル・再実行・削除、Label／Milestone の削除、Project の削除・Field 定義変更・Draft Item 作成、Organization／Environment を含む Secret の管理までを、96 個の型付きツールとして提供します。
 
-> [!IMPORTANT]
-> 現在は Phase 5（最終フェーズ）です。計画した全フェーズを実装済みで、かつて「提供しない操作」としていた機能は全て提供します。意図的に提供しないまま残すのは、認証情報そのものの操作、force push、`run_gh` での任意書き込みだけです（「セキュリティと制約」参照）。1 つの MCP プロセスから複数の GitHub CLI 認証を明示的に選択できます。
-
 ## 特徴
 
 - **汎用実行にしない**: GitHub API を自由に実行させるのではなく、操作ごとに型付きツールを用意します。`run_gh` は読み取り専用コマンドだけに限定します。
