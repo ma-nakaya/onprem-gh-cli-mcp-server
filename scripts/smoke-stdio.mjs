@@ -81,6 +81,12 @@ const expectedTools = [
   "delete_milestone",
   "update_milestone",
   "create_project",
+  "delete_project",
+  "create_project_draft_item",
+  "delete_project_item",
+  "create_project_field",
+  "update_project_field",
+  "delete_project_field",
   "update_project",
   "list_project_items",
   "list_project_fields",
@@ -92,9 +98,6 @@ const expectedTools = [
 ];
 
 const forbiddenTools = [
-  "delete_project",
-  "delete_project_item",
-  "create_project_field",
   "force_push_branch",
   "show_token",
 ];

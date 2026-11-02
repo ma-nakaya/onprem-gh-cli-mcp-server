@@ -25,7 +25,7 @@ export function ownerNodeId(value: unknown): string {
   return item.node_id;
 }
 
-export function graphqlProject(value: unknown, operation: "createProjectV2" | "updateProjectV2" | "node"): Record<string, unknown> {
+export function graphqlProject(value: unknown, operation: "createProjectV2" | "updateProjectV2" | "deleteProjectV2" | "node"): Record<string, unknown> {
   const root = objectResponse(value, "GraphQL");
   assertNoGraphqlErrors(root);
   const data = objectResponse(root.data, "GraphQL data");
@@ -128,7 +128,7 @@ export function projectFieldsSummary(value: unknown): Record<string, unknown> {
   };
 }
 
-export function graphqlProjectItem(value: unknown, operation: "addProjectV2ItemById" | "archiveProjectV2Item" | "unarchiveProjectV2Item" | "updateProjectV2ItemFieldValue" | "clearProjectV2ItemFieldValue"): Record<string, unknown> {
+export function graphqlProjectItem(value: unknown, operation: "addProjectV2ItemById" | "addProjectV2DraftIssue" | "archiveProjectV2Item" | "unarchiveProjectV2Item" | "updateProjectV2ItemFieldValue" | "clearProjectV2ItemFieldValue"): Record<string, unknown> {
   const root = objectResponse(value, "GraphQL");
   assertNoGraphqlErrors(root);
   const data = objectResponse(root.data, "GraphQL data");
@@ -159,13 +159,14 @@ export interface ProjectUpdates {
   shortDescription?: string;
   readme?: string;
   closed?: boolean;
+  public?: boolean;
 }
 
 export function buildUpdateProjectMutation(projectId: string, updates: ProjectUpdates): { query: string; variables: Record<string, unknown> } {
   const variables: Record<string, unknown> = { projectId };
   const variableDefinitions = ["$projectId: ID!"];
   const inputFields = ["projectId: $projectId"];
-  for (const [name, type] of [["title", "String"], ["shortDescription", "String"], ["readme", "String"], ["closed", "Boolean"]] as const) {
+  for (const [name, type] of [["title", "String"], ["shortDescription", "String"], ["readme", "String"], ["closed", "Boolean"], ["public", "Boolean"]] as const) {
     const value = updates[name];
     if (value !== undefined) {
       variables[name] = value;
@@ -182,4 +183,37 @@ export function buildUpdateProjectMutation(projectId: string, updates: ProjectUp
     }`,
     variables,
   };
+}
+
+export function graphqlProjectField(
+  value: unknown,
+  operation: "createProjectV2Field" | "updateProjectV2Field" | "deleteProjectV2Field",
+): Record<string, unknown> {
+  const root = objectResponse(value, "GraphQL");
+  assertNoGraphqlErrors(root);
+  const data = objectResponse(root.data, "GraphQL data");
+  const payload = objectResponse(data[operation], `${operation} payload`);
+  return objectResponse(payload.projectV2Field, "project field");
+}
+
+export function projectFieldSummary(value: unknown): Record<string, unknown> {
+  const field = objectResponse(value, "project field");
+  return {
+    id: field.id,
+    name: field.name,
+    dataType: field.dataType,
+    type: field.__typename,
+    ...(Array.isArray(field.options) ? { options: field.options } : {}),
+  };
+}
+
+export function graphqlDeletedItemId(value: unknown): string {
+  const root = objectResponse(value, "GraphQL");
+  assertNoGraphqlErrors(root);
+  const data = objectResponse(root.data, "GraphQL data");
+  const payload = objectResponse(data.deleteProjectV2Item, "deleteProjectV2Item payload");
+  if (typeof payload.deletedItemId !== "string" || payload.deletedItemId.length === 0) {
+    throw new Error("GitHub GraphQL returned a deletion without an item ID.");
+  }
+  return payload.deletedItemId;
 }

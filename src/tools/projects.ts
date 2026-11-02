@@ -8,9 +8,12 @@ import {
 import {
   assertProjectOwner,
   buildUpdateProjectMutation,
+  graphqlDeletedItemId,
   graphqlProject,
+  graphqlProjectField,
   graphqlProjectItem,
   ownerNodeId,
+  projectFieldSummary,
   projectFieldValue,
   projectFieldsSummary,
   projectIdentifier,
@@ -36,7 +39,7 @@ export function registerProjectTools(server: McpServer, config: Config): void {
   } = buildSharedSchemas();
 
 server.registerTool("create_project", {
-  description: "Create a private GitHub Projects v2 project for an allowed user or organization. This tool cannot make the project public or delete it.",
+  description: "Create a GitHub Projects v2 project for an allowed user or organization. New projects are always private; use update_project to change visibility.",
   inputSchema: {
     ...requestContextSchema,
     ownerType: z.enum(["user", "organization"]),
@@ -77,7 +80,7 @@ server.registerTool("create_project", {
 });
 
 server.registerTool("update_project", {
-  description: "Update a GitHub Projects v2 title, descriptions, or reversible open/closed state. This tool cannot change visibility or delete a project.",
+  description: "Update a GitHub Projects v2 title, descriptions, visibility (public), or reversible open/closed state.",
   inputSchema: {
     ...requestContextSchema,
     owner: ownerLoginSchema.describe("Allowed owner used as the authorization scope"),
@@ -86,9 +89,10 @@ server.registerTool("update_project", {
     shortDescription: z.string().max(256).optional(),
     readme: z.string().max(65_536).optional(),
     closed: z.boolean().optional(),
+    public: z.boolean().optional(),
   },
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-}, async ({ account, hostname, owner, projectId, title, shortDescription, readme, closed }) => {
+}, async ({ account, hostname, owner, projectId, title, shortDescription, readme, closed, public: isPublic }) => {
   const normalizedOwner = owner.trim().toLowerCase();
   const normalizedProjectId = projectId.trim();
   const request = await prepareWriteRequest({
@@ -104,6 +108,7 @@ server.registerTool("update_project", {
     ...(shortDescription === undefined ? {} : { shortDescription }),
     ...(readme === undefined ? {} : { readme }),
     ...(closed === undefined ? {} : { closed }),
+    ...(isPublic === undefined ? {} : { public: isPublic }),
   });
 
   const readQuery = `query($projectId: ID!) {
@@ -191,7 +196,7 @@ server.registerTool("list_project_fields", {
 });
 
 server.registerTool("add_project_item", {
-  description: "Add an existing Issue or Pull Request to a GitHub Projects v2 project. Draft items cannot be created.",
+  description: "Add an existing Issue or Pull Request to a GitHub Projects v2 project.",
   inputSchema: {
     ...writeContextSchema,
     owner: ownerLoginSchema,
@@ -330,5 +335,297 @@ server.registerTool("set_project_item_archived", {
     { query, variables: { projectId: normalizedProjectId, itemId: normalizedItemId } }, config,
   );
   return response({ item: projectItemSummary(graphqlProjectItem(operation.value, operationName)), audit: operation.audit });
+});
+server.registerTool("delete_project", {
+  description: "Delete a GitHub Projects v2 project. The exact current project title must be repeated as confirmation. This operation cannot be undone by this MCP server; the contained Issues and Pull Requests are not deleted.",
+  inputSchema: {
+    ...requestContextSchema,
+    owner: ownerLoginSchema.describe("Allowed owner used as the authorization scope"),
+    projectId: projectIdSchema,
+    confirmTitle: z.string().trim().min(1).max(256)
+      .describe("Repeat the exact current title of the project"),
+  },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+}, async ({ account, hostname, owner, projectId, confirmTitle }) => {
+  const normalizedOwner = owner.trim().toLowerCase();
+  const normalizedProjectId = projectId.trim();
+  const request = await prepareWriteRequest({
+    tool: "delete_project",
+    owner: normalizedOwner,
+    projectId: normalizedProjectId,
+  }, config, account, hostname);
+  const { context } = request;
+  assertOwnerAllowed(owner, context);
+  const normalizedHostname = context.profile.hostname;
+  const readQuery = `query($projectId: ID!) {
+    node(id: $projectId) { __typename ... on ProjectV2 { id number title url closed public owner { ... on User { login } ... on Organization { login } } } }
+  }`;
+  const existing = await jsonGh(
+    ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+    config,
+    context,
+    { stdin: JSON.stringify({ query: readQuery, variables: { projectId: normalizedProjectId } }) },
+  );
+  const project = assertProjectOwner(existing, normalizedOwner);
+  if (confirmTitle !== project.title) {
+    throw new Error("confirmTitle must exactly match the current project title; refusing project deletion.");
+  }
+  const query = `mutation($projectId: ID!) {
+    deleteProjectV2(input: { projectId: $projectId }) {
+      projectV2 { id number title url closed public }
+    }
+  }`;
+  const operation = await auditedGraphqlGh(
+    request,
+    ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+    { query, variables: { projectId: normalizedProjectId } },
+    config,
+  );
+  return response({
+    deleted: { project: projectSummary(graphqlProject(operation.value, "deleteProjectV2")) },
+    audit: operation.audit,
+  });
+});
+
+server.registerTool("create_project_draft_item", {
+  description: "Create a draft item in a GitHub Projects v2 project. The title and body are sent through stdin and are not written to the audit log.",
+  inputSchema: {
+    ...requestContextSchema,
+    owner: ownerLoginSchema,
+    projectId: projectIdSchema,
+    title: z.string().trim().min(1).max(256),
+    body: z.string().max(65_536).optional(),
+  },
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+}, async ({ account, hostname, owner, projectId, title, body }) => {
+  const normalizedOwner = owner.trim().toLowerCase();
+  const normalizedProjectId = projectId.trim();
+  const request = await prepareWriteRequest({
+    tool: "create_project_draft_item",
+    owner: normalizedOwner,
+    projectId: normalizedProjectId,
+  }, config, account, hostname);
+  const { context } = request;
+  assertOwnerAllowed(owner, context);
+  const normalizedHostname = context.profile.hostname;
+  await assertProjectAccess(normalizedProjectId, owner, config, context);
+  const query = `mutation($projectId: ID!, $title: String!, $body: String) {
+    addProjectV2DraftIssue(input: { projectId: $projectId, title: $title, body: $body }) {
+      projectV2Item { id isArchived }
+    }
+  }`;
+  const variables: Record<string, unknown> = { projectId: normalizedProjectId, title: title.trim() };
+  if (body !== undefined) variables.body = body;
+  const operation = await auditedGraphqlGh(
+    request,
+    ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+    { query, variables },
+    config,
+    (value) => ({ projectItemId: String(graphqlProjectItem(value, "addProjectV2DraftIssue").id) }),
+  );
+  return response({
+    item: projectItemSummary(graphqlProjectItem(operation.value, "addProjectV2DraftIssue")),
+    audit: operation.audit,
+  });
+});
+
+server.registerTool("delete_project_item", {
+  description: "Delete an item from a GitHub Projects v2 project. The underlying Issue or Pull Request is not deleted. This operation cannot be undone by this MCP server.",
+  inputSchema: {
+    ...requestContextSchema,
+    owner: ownerLoginSchema,
+    projectId: projectIdSchema,
+    itemId: projectItemIdSchema,
+  },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+}, async ({ account, hostname, owner, projectId, itemId }) => {
+  const normalizedOwner = owner.trim().toLowerCase();
+  const normalizedProjectId = projectId.trim();
+  const normalizedItemId = itemId.trim();
+  const request = await prepareWriteRequest({
+    tool: "delete_project_item",
+    owner: normalizedOwner,
+    projectId: normalizedProjectId,
+    projectItemId: normalizedItemId,
+  }, config, account, hostname);
+  const { context } = request;
+  assertOwnerAllowed(owner, context);
+  const normalizedHostname = context.profile.hostname;
+  await assertProjectAccess(normalizedProjectId, owner, config, context);
+  const query = `mutation($projectId: ID!, $itemId: ID!) {
+    deleteProjectV2Item(input: { projectId: $projectId, itemId: $itemId }) { deletedItemId }
+  }`;
+  const operation = await auditedGraphqlGh(
+    request,
+    ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+    { query, variables: { projectId: normalizedProjectId, itemId: normalizedItemId } },
+    config,
+  );
+  return response({
+    deleted: { itemId: graphqlDeletedItemId(operation.value), projectId: normalizedProjectId },
+    audit: operation.audit,
+  });
+});
+
+const singleSelectOptionSchema = z.object({
+  id: z.string().trim().min(1).max(128).optional(),
+  name: z.string().trim().min(1).max(128),
+  color: z.enum(["GRAY", "BLUE", "GREEN", "YELLOW", "ORANGE", "RED", "PINK", "PURPLE"]).default("GRAY"),
+  description: z.string().max(256).optional(),
+});
+
+server.registerTool("create_project_field", {
+  description: "Create a TEXT, NUMBER, DATE, or SINGLE_SELECT field on a GitHub Projects v2 project. SINGLE_SELECT requires at least one option. Iteration fields cannot be created by this tool.",
+  inputSchema: {
+    ...requestContextSchema,
+    owner: ownerLoginSchema,
+    projectId: projectIdSchema,
+    name: z.string().trim().min(1).max(256),
+    dataType: z.enum(["TEXT", "NUMBER", "DATE", "SINGLE_SELECT"]),
+    singleSelectOptions: z.array(singleSelectOptionSchema).min(1).max(50).optional(),
+  },
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+}, async ({ account, hostname, owner, projectId, name, dataType, singleSelectOptions }) => {
+  const normalizedOwner = owner.trim().toLowerCase();
+  const normalizedProjectId = projectId.trim();
+  const request = await prepareWriteRequest({
+    tool: "create_project_field",
+    owner: normalizedOwner,
+    projectId: normalizedProjectId,
+  }, config, account, hostname);
+  const { context } = request;
+  assertOwnerAllowed(owner, context);
+  const normalizedHostname = context.profile.hostname;
+  if (dataType === "SINGLE_SELECT" && (singleSelectOptions === undefined || singleSelectOptions.length === 0)) {
+    throw new Error("SINGLE_SELECT fields require at least one option.");
+  }
+  if (dataType !== "SINGLE_SELECT" && singleSelectOptions !== undefined) {
+    throw new Error("singleSelectOptions can only be provided for SINGLE_SELECT fields.");
+  }
+  await assertProjectAccess(normalizedProjectId, owner, config, context);
+  const query = `mutation($projectId: ID!, $dataType: ProjectV2CustomFieldType!, $name: String!, $options: [ProjectV2SingleSelectFieldOptionInput!]) {
+    createProjectV2Field(input: { projectId: $projectId, dataType: $dataType, name: $name, singleSelectOptions: $options }) {
+      projectV2Field { id name dataType __typename ... on ProjectV2SingleSelectField { options { id name } } }
+    }
+  }`;
+  const variables: Record<string, unknown> = {
+    projectId: normalizedProjectId,
+    dataType,
+    name: name.trim(),
+  };
+  if (singleSelectOptions !== undefined) {
+    variables.options = singleSelectOptions.map((option) => ({
+      name: option.name,
+      color: option.color,
+      ...(option.description === undefined ? {} : { description: option.description }),
+    }));
+  }
+  const operation = await auditedGraphqlGh(
+    request,
+    ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+    { query, variables },
+    config,
+    (value) => ({ projectFieldId: String(graphqlProjectField(value, "createProjectV2Field").id) }),
+  );
+  return response({
+    field: projectFieldSummary(graphqlProjectField(operation.value, "createProjectV2Field")),
+    audit: operation.audit,
+  });
+});
+
+server.registerTool("update_project_field", {
+  description: "Rename a GitHub Projects v2 field, or replace the options of a single-select field. Options with an id keep that option; options without an id are created.",
+  inputSchema: {
+    ...requestContextSchema,
+    owner: ownerLoginSchema,
+    projectId: projectIdSchema,
+    fieldId: projectFieldIdSchema,
+    name: z.string().trim().min(1).max(256).optional(),
+    singleSelectOptions: z.array(singleSelectOptionSchema).min(1).max(50).optional(),
+  },
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+}, async ({ account, hostname, owner, projectId, fieldId, name, singleSelectOptions }) => {
+  const normalizedOwner = owner.trim().toLowerCase();
+  const normalizedProjectId = projectId.trim();
+  const normalizedFieldId = fieldId.trim();
+  const request = await prepareWriteRequest({
+    tool: "update_project_field",
+    owner: normalizedOwner,
+    projectId: normalizedProjectId,
+    projectFieldId: normalizedFieldId,
+  }, config, account, hostname);
+  const { context } = request;
+  assertOwnerAllowed(owner, context);
+  const normalizedHostname = context.profile.hostname;
+  if (name === undefined && singleSelectOptions === undefined) {
+    throw new Error("At least one field update must be provided.");
+  }
+  await assertProjectAccess(normalizedProjectId, owner, config, context);
+  const query = `mutation($fieldId: ID!, $name: String, $options: [ProjectV2SingleSelectFieldOptionInput!]) {
+    updateProjectV2Field(input: { fieldId: $fieldId, name: $name, singleSelectOptions: $options }) {
+      projectV2Field { id name dataType __typename ... on ProjectV2SingleSelectField { options { id name } } }
+    }
+  }`;
+  const variables: Record<string, unknown> = { fieldId: normalizedFieldId };
+  if (name !== undefined) variables.name = name.trim();
+  if (singleSelectOptions !== undefined) {
+    variables.options = singleSelectOptions.map((option) => ({
+      ...(option.id === undefined ? {} : { id: option.id }),
+      name: option.name,
+      color: option.color,
+      ...(option.description === undefined ? {} : { description: option.description }),
+    }));
+  }
+  const operation = await auditedGraphqlGh(
+    request,
+    ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+    { query, variables },
+    config,
+    (value) => ({ projectFieldId: String(graphqlProjectField(value, "updateProjectV2Field").id) }),
+  );
+  return response({
+    field: projectFieldSummary(graphqlProjectField(operation.value, "updateProjectV2Field")),
+    audit: operation.audit,
+  });
+});
+
+server.registerTool("delete_project_field", {
+  description: "Delete a field definition from a GitHub Projects v2 project. Values stored in this field are lost. This operation cannot be undone by this MCP server.",
+  inputSchema: {
+    ...requestContextSchema,
+    owner: ownerLoginSchema,
+    projectId: projectIdSchema,
+    fieldId: projectFieldIdSchema,
+  },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+}, async ({ account, hostname, owner, projectId, fieldId }) => {
+  const normalizedOwner = owner.trim().toLowerCase();
+  const normalizedProjectId = projectId.trim();
+  const normalizedFieldId = fieldId.trim();
+  const request = await prepareWriteRequest({
+    tool: "delete_project_field",
+    owner: normalizedOwner,
+    projectId: normalizedProjectId,
+    projectFieldId: normalizedFieldId,
+  }, config, account, hostname);
+  const { context } = request;
+  assertOwnerAllowed(owner, context);
+  const normalizedHostname = context.profile.hostname;
+  await assertProjectAccess(normalizedProjectId, owner, config, context);
+  const query = `mutation($fieldId: ID!) {
+    deleteProjectV2Field(input: { fieldId: $fieldId }) {
+      projectV2Field { id name dataType __typename }
+    }
+  }`;
+  const operation = await auditedGraphqlGh(
+    request,
+    ["api", "graphql", "--hostname", normalizedHostname, "--method", "POST", "--input", "-"],
+    { query, variables: { fieldId: normalizedFieldId } },
+    config,
+  );
+  return response({
+    deleted: { field: projectFieldSummary(graphqlProjectField(operation.value, "deleteProjectV2Field")) },
+    audit: operation.audit,
+  });
 });
 }

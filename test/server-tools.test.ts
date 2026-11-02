@@ -96,6 +96,13 @@ describe("MCP tool registration", () => {
       expect(tools.get("delete_workflow_run")?.annotations?.destructiveHint).toBe(true);
       expect(tools.get("delete_label")?.annotations?.destructiveHint).toBe(true);
       expect(tools.get("delete_milestone")?.annotations?.destructiveHint).toBe(true);
+      for (const name of ["delete_project", "delete_project_item", "delete_project_field"]) {
+        expect(tools.get(name)?.annotations?.destructiveHint).toBe(true);
+      }
+      for (const name of ["create_project_draft_item", "create_project_field", "update_project_field"]) {
+        expect(tools.has(name)).toBe(true);
+        expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
+      }
       for (const name of ["rename_repository", "set_repository_archived", "transfer_repository", "delete_branch"]) {
         expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
         expect(tools.get(name)?.annotations?.destructiveHint).toBe(true);
@@ -119,7 +126,6 @@ describe("MCP tool registration", () => {
         expect(tools.has(name)).toBe(true);
         expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
       }
-      expect(tools.has("delete_project")).toBe(false);
       expect(tools.has("publish_project")).toBe(false);
       for (const name of ["list_project_items", "list_project_fields"]) {
         expect(tools.has(name)).toBe(true);
@@ -129,8 +135,6 @@ describe("MCP tool registration", () => {
         expect(tools.has(name)).toBe(true);
         expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
       }
-      expect(tools.has("delete_project_item")).toBe(false);
-      expect(tools.has("create_project_field")).toBe(false);
       expect(tools.get("get_branch")?.annotations?.readOnlyHint).toBe(true);
       for (const name of ["list_repository_tree", "get_repository_file"]) {
         expect(tools.has(name)).toBe(true);
