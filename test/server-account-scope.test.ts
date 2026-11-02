@@ -557,6 +557,114 @@ describe("MCP account and resource isolation", () => {
     }
   });
 
+  it("deletes a release after reading its tag and audits the mutation", async () => {
+    runGhMock.mockImplementation(async (args) => {
+      if (args[1] === "user") {
+        return { exitCode: 0, stdout: "masa-nakaya\n", stderr: "" };
+      }
+      if (args[1] === "repos/masa-nakaya/example/releases/99" && !args.includes("--method")) {
+        return { exitCode: 0, stdout: JSON.stringify({ id: 99, tag_name: "v1.0.0" }), stderr: "" };
+      }
+      if (args[1] === "repos/masa-nakaya/example/releases/99" && args.includes("DELETE")) {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      throw new Error(`Unexpected gh endpoint in test: ${args[1] ?? ""}`);
+    });
+    const connection = await connectedClient(accountConfig());
+
+    try {
+      const result = await connection.client.callTool({
+        name: "delete_release",
+        arguments: { repository: "masa-nakaya/example", releaseId: 99 },
+      });
+
+      expect(result.isError).not.toBe(true);
+      const parsed = JSON.parse((result.content[0] as { text: string }).text);
+      expect(parsed.deleted).toEqual({ releaseId: 99, tagName: "v1.0.0", repository: "masa-nakaya/example" });
+      expect(appendAuditRecordMock.mock.calls.at(-1)?.[1]).toMatchObject({
+        tool: "delete_release",
+        outcome: "succeeded",
+        releaseId: 99,
+      });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("uploads a release asset through gh release upload for the resolved tag", async () => {
+    let uploadArgs: unknown;
+    runGhMock.mockImplementation(async (args) => {
+      if (args[1] === "user") {
+        return { exitCode: 0, stdout: "masa-nakaya\n", stderr: "" };
+      }
+      if (args[0] === "api" && args[1] === "repos/masa-nakaya/example/releases/99") {
+        return { exitCode: 0, stdout: JSON.stringify({ id: 99, tag_name: "v1.0.0" }), stderr: "" };
+      }
+      if (args[0] === "release" && args[1] === "upload") {
+        uploadArgs = args;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      throw new Error(`Unexpected gh call in test: ${args.join(" ")}`);
+    });
+    const connection = await connectedClient(accountConfig());
+
+    try {
+      const result = await connection.client.callTool({
+        name: "upload_release_asset",
+        arguments: {
+          repository: "masa-nakaya/example",
+          releaseId: 99,
+          filePath: "C:/build/app.zip",
+          clobber: true,
+        },
+      });
+
+      expect(result.isError).not.toBe(true);
+      expect(uploadArgs).toEqual([
+        "release",
+        "upload",
+        "v1.0.0",
+        "C:/build/app.zip",
+        "--repo",
+        "masa-nakaya/example",
+        "--clobber",
+      ]);
+      const parsed = JSON.parse((result.content[0] as { text: string }).text);
+      expect(parsed.uploaded.name).toBe("app.zip");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("deletes a release asset by ID with an audited DELETE", async () => {
+    runGhMock.mockImplementation(async (args) => {
+      if (args[1] === "user") {
+        return { exitCode: 0, stdout: "masa-nakaya\n", stderr: "" };
+      }
+      if (args[1] === "repos/masa-nakaya/example/releases/assets/7" && args.includes("DELETE")) {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      throw new Error(`Unexpected gh endpoint in test: ${args[1] ?? ""}`);
+    });
+    const connection = await connectedClient(accountConfig());
+
+    try {
+      const result = await connection.client.callTool({
+        name: "delete_release_asset",
+        arguments: { repository: "masa-nakaya/example", releaseAssetId: 7 },
+      });
+
+      expect(result.isError).not.toBe(true);
+      expect(appendAuditRecordMock.mock.calls.at(-1)?.[1]).toMatchObject({
+        tool: "delete_release_asset",
+        outcome: "succeeded",
+        releaseAssetId: 7,
+      });
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("audits a GraphQL mutation rejected through top-level errors as failed", async () => {
     runGhMock.mockImplementation(async (args) => {
       if (args[1] === "user") {

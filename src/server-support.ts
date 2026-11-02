@@ -485,6 +485,7 @@ export interface AuditTarget {
   reviewCommentId?: number;
   reviewThreadId?: string;
   releaseId?: number;
+  releaseAssetId?: number;
   secretName?: string;
   workflow?: string;
   label?: string;
