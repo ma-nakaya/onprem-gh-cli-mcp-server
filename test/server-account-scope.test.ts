@@ -1035,6 +1035,53 @@ describe("MCP account and resource isolation", () => {
     }
   });
 
+  it("creates an iteration project field with its configuration", async () => {
+    let createVariables: Record<string, unknown> = {};
+    runGhMock.mockImplementation(async (args, _config, _context, options) => {
+      if (args[1] === "user") {
+        return { exitCode: 0, stdout: "masa-nakaya\n", stderr: "" };
+      }
+      if (args[1] === "graphql") {
+        const payload = JSON.parse(options?.stdin ?? "{}") as { query: string; variables: Record<string, unknown> };
+        if (payload.query.includes("node(id")) {
+          return { exitCode: 0, stdout: JSON.stringify({ data: { node: { __typename: "ProjectV2", id: "PVT_project123", owner: { login: "masa-nakaya" } } } }), stderr: "" };
+        }
+        if (payload.query.includes("createProjectV2Field(")) {
+          createVariables = payload.variables;
+          return { exitCode: 0, stdout: JSON.stringify({ data: { createProjectV2Field: { projectV2Field: { id: "PVTF_iter123", name: "Sprint", dataType: "ITERATION", __typename: "ProjectV2IterationField" } } } }), stderr: "" };
+        }
+      }
+      throw new Error(`Unexpected gh call in test: ${args.join(" ")}`);
+    });
+    const connection = await connectedClient(accountConfig());
+
+    try {
+      const result = await connection.client.callTool({
+        name: "create_project_field",
+        arguments: {
+          owner: "masa-nakaya",
+          projectId: "PVT_project123",
+          name: "Sprint",
+          dataType: "ITERATION",
+          iterationConfiguration: {
+            startDate: "2026-11-03",
+            durationDays: 14,
+            iterations: [{ title: "Sprint 1", startDate: "2026-11-03" }],
+          },
+        },
+      });
+
+      expect(result.isError).not.toBe(true);
+      expect(createVariables.iterationConfiguration).toEqual({
+        startDate: "2026-11-03",
+        duration: 14,
+        iterations: [{ title: "Sprint 1", startDate: "2026-11-03" }],
+      });
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("audits a GraphQL mutation rejected through top-level errors as failed", async () => {
     runGhMock.mockImplementation(async (args) => {
       if (args[1] === "user") {
