@@ -31,14 +31,23 @@ The names below are the MCP server's bare tool names. A client may display a wra
 - `update_repository_description`
 - `delete_repository`
 - `update_repository_visibility`
-- `publish_release`
+- `rename_repository`
+- `set_repository_archived`
+- `transfer_repository`
 - `list_repository_secrets`
 - `set_repository_secret`
 - `delete_repository_secret`
+- `list_organization_secrets`
+- `set_organization_secret`
+- `delete_organization_secret`
+- `list_environment_secrets`
+- `set_environment_secret`
+- `delete_environment_secret`
 - `get_branch`
 - `list_repository_tree`
 - `get_repository_file`
 - `create_branch`
+- `delete_branch`
 - `commit_files`
 
 Key arguments and limits:
@@ -47,7 +56,10 @@ Key arguments and limits:
 - `update_repository_description`: require the stable numeric repository ID returned by `get_repository`.
 - `delete_repository`: require `expectedRepositoryId` and `confirmRepository` equal to the freshly read canonical `owner/name`. Deletion is permanent through this server.
 - `update_repository_visibility`: require the same `expectedRepositoryId` and `confirmRepository` confirmation as `delete_repository`. A change to the current visibility is refused.
-- `set_repository_secret` / `delete_repository_secret`: repository Actions secrets only. The value is passed to `gh` through stdin only and must never be echoed, logged, or included in arguments or responses; only the secret name is audited.
+- `set_repository_secret` / `delete_repository_secret`: repository Actions secrets. The value is passed to `gh` through stdin only and must never be echoed, logged, or included in arguments or responses; only the secret name is audited.
+- `rename_repository` / `transfer_repository`: require the same `expectedRepositoryId` and `confirmRepository` confirmation as `delete_repository`. `set_repository_archived` requires `expectedRepositoryId` and refuses a no-op state change.
+- Organization secrets (`list_organization_secrets`, `set_organization_secret`, `delete_organization_secret`) follow the same stdin-only value rule; `set_organization_secret` requires `visibility` (`all`, `private`, or `selected`), and `selected` requires repository names. Environment secrets (`list_environment_secrets`, `set_environment_secret`, `delete_environment_secret`) are scoped by repository and environment name.
+- `delete_branch`: require `expectedHeadSha` equal to the current head; the repository default branch cannot be deleted.
 - `list_repository_tree`: `ref`, optional `path`, `recursive`, `offset` 0-1,000,000, and `limit` 1-100 (default 100). Recursive Git Trees results can be truncated; traverse subtrees non-recursively for complete coverage.
 - `get_repository_file`: `ref`, `path`, `format` (`utf8` or `base64`), `offsetBytes`, and `limitBytes` up to 131,072. Follow `nextOffsetBytes`; committed blobs are limited to 100 MiB. Symlinks, submodules, and Git LFS objects are not followed.
 - `create_branch`: `branch` and optional `sourceBranch` (default `main`); existing refs are not overwritten.
@@ -113,16 +125,23 @@ Key arguments and limits:
 - `list_workflow_run_jobs`
 - `get_workflow_job_log`
 - `dispatch_workflow`
+- `cancel_workflow_run`
+- `rerun_workflow_run`
+- `delete_workflow_run`
 
-`list_workflow_runs` accepts `limit` 1-100 (default 30). Job pagination uses `page` 1-10,000 and `perPage` 1-100, with optional positive `attempt` up to 1,000. `get_workflow_job_log` requires `runId` and `jobId`, defaults to `failedOnly: true`, and returns at most 131,072 bytes per chunk. `dispatch_workflow` requires an active `workflow`, exact `ref`, and optional string inputs; it can trigger high-impact repository behavior.
+`list_workflow_runs` accepts `limit` 1-100 (default 30). Job pagination uses `page` 1-10,000 and `perPage` 1-100, with optional positive `attempt` up to 1,000. `get_workflow_job_log` requires `runId` and `jobId`, defaults to `failedOnly: true`, and returns at most 131,072 bytes per chunk. `dispatch_workflow` requires an active `workflow`, exact `ref`, and optional string inputs; it can trigger high-impact repository behavior. Run lifecycle tools read the run state first: `cancel_workflow_run` accepts only runs that have not completed, while `rerun_workflow_run` (optionally `failedJobsOnly`) and `delete_workflow_run` accept only completed runs.
 
-### Draft releases
+### Releases
 
 - `create_release`
 - `update_release`
 - `publish_release`
+- `delete_release`
+- `list_release_assets`
+- `upload_release_asset`
+- `delete_release_asset`
 
-`create_release` always creates a Draft Release. It accepts `tagName`, optional `targetCommitish`, name up to 256 characters, body up to 125,000 characters, `prerelease`, and `generateReleaseNotes`. `update_release` changes Draft metadata only. `publish_release` publishes an existing Draft Release (optionally setting `prerelease`); publication cannot be undone through this server. Deletion and asset mutation are unsupported.
+`create_release` always creates a Draft Release. It accepts `tagName`, optional `targetCommitish`, name up to 256 characters, body up to 125,000 characters, `prerelease`, and `generateReleaseNotes`. `update_release` changes Draft metadata only. `publish_release` publishes an existing Draft Release (optionally setting `prerelease`); publication cannot be undone through this server. `delete_release` deletes a Draft or published Release (the tag remains). `upload_release_asset` uploads a local file through `gh release upload` for the resolved tag (optional `clobber`); file contents never appear in responses or the audit log. `delete_release_asset` deletes one asset by ID from `list_release_assets`.
 
 ### Labels and milestones
 
@@ -132,23 +151,31 @@ Key arguments and limits:
 - `remove_issue_label`
 - `create_label`
 - `update_label`
+- `delete_label`
 - `create_milestone`
 - `update_milestone`
+- `delete_milestone`
 
-Label list pagination uses pages up to 3,000 and `perPage` up to 100. Label colors are six hexadecimal digits. Adding labels preserves other assignments; removing one assignment does not delete the label definition. Milestone due dates use UTC ISO 8601. Label and milestone deletion are unsupported.
+Label list pagination uses pages up to 3,000 and `perPage` up to 100. Label colors are six hexadecimal digits. Adding labels preserves other assignments; removing one assignment does not delete the label definition. Milestone due dates use UTC ISO 8601. `delete_label` and `delete_milestone` read the target first, then delete it; assigned Issues and pull requests lose the label or milestone.
 
 ### Projects v2
 
 - `create_project`
 - `update_project`
+- `delete_project`
 - `list_project_items`
 - `list_project_fields`
 - `add_project_item`
+- `create_project_draft_item`
+- `delete_project_item`
 - `set_project_item_field`
 - `clear_project_item_field`
 - `set_project_item_archived`
+- `create_project_field`
+- `update_project_field`
+- `delete_project_field`
 
-Owner-wide Project operations require an allowed owner. Project IDs use `PVT_...`; item IDs use `PVTI_...`. Resolve field, option, iteration, and item IDs with list tools; never guess them. Field values support text, number, date, single-select, and iteration. New Projects are private. Item archive is reversible and does not delete its Issue or pull request.
+Owner-wide Project operations require an allowed owner. Project IDs use `PVT_...`; item IDs use `PVTI_...`. Resolve field, option, iteration, and item IDs with list tools; never guess them. Field values support text, number, date, single-select, and iteration. New Projects are private; `update_project` can later change `public`, title, descriptions, and closed state. `delete_project` requires `confirmTitle` exactly matching the current title. `create_project_field` supports TEXT, NUMBER, DATE, SINGLE_SELECT (options required), and ITERATION (an iteration configuration is required); `update_project_field` renames a field or replaces single-select options. Deleting a Project, item, or field is permanent through this server; item archive is reversible and does not delete its Issue or pull request.
 
 ### Read-only escape hatch
 
@@ -158,15 +185,10 @@ Pass `args` as an array, never as a shell command. It is allowlisted and read-on
 
 ## Unsupported and safety boundaries
 
-The server does not support:
+All operations that were previously listed here as unsupported are now implemented through the typed tools above. The remaining boundaries are deliberate design limits of this server, not missing features:
 
-- Renaming, transferring, or archiving an existing repository.
-- Force push or direct file commits to common default branch names.
-- Deleting branches, releases, workflow runs, labels, milestones, Projects, or Project items.
-- Mutating release assets.
-- Cancelling or rerunning workflows.
-- Changing Project visibility, mutating Project field schemas, or creating Draft Project items.
-- Mutating tokens or credentials, organization or environment secrets, rulesets, environments, teams, or organization membership. Repository Actions secrets are supported only through the dedicated secret tools above.
-- Arbitrary write commands through `run_gh`.
+- Displaying or mutating authentication material itself (tokens, credentials), and `gh auth` operations.
+- Force push, and direct file commits to common default branch names.
+- Arbitrary write commands through `run_gh`; it stays read-only.
 
 Do not substitute a generic command, another account, or another integration to cross these boundaries. Treat permanent repository or inline-comment deletion, workflow dispatch, commit creation, and pull-request merge as high-impact operations. Never retry a non-idempotent or ambiguously completed write without first reading current state and proving that the prior effect did not occur.
