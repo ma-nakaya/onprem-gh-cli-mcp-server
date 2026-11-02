@@ -86,6 +86,12 @@ describe("MCP tool registration", () => {
       expect(tools.get("set_repository_secret")?.annotations?.readOnlyHint).toBe(false);
       expect(tools.get("set_repository_secret")?.annotations?.destructiveHint).toBe(false);
       expect(tools.get("delete_repository_secret")?.annotations?.destructiveHint).toBe(true);
+      expect(tools.get("list_organization_secrets")?.annotations?.readOnlyHint).toBe(true);
+      expect(tools.get("set_organization_secret")?.annotations?.readOnlyHint).toBe(false);
+      expect(tools.get("delete_organization_secret")?.annotations?.destructiveHint).toBe(true);
+      expect(tools.get("list_environment_secrets")?.annotations?.readOnlyHint).toBe(true);
+      expect(tools.get("set_environment_secret")?.annotations?.readOnlyHint).toBe(false);
+      expect(tools.get("delete_environment_secret")?.annotations?.destructiveHint).toBe(true);
       expect(tools.get("delete_release")?.annotations?.destructiveHint).toBe(true);
       expect(tools.get("list_release_assets")?.annotations?.readOnlyHint).toBe(true);
       expect(tools.get("upload_release_asset")?.annotations?.readOnlyHint).toBe(false);

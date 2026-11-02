@@ -964,4 +964,138 @@ describe("review and administration MCP tools", () => {
       await connection.close();
     }
   });
+
+  it("sets an organization secret for selected repositories through stdin only", async () => {
+    runGhMock
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(""));
+    const connection = await connectedClient();
+    try {
+      const toolResult = await connection.client.callTool({
+        name: "set_organization_secret",
+        arguments: {
+          owner: "ma-nakaya",
+          secretName: "ORG_TOKEN",
+          secretValue: "org-secret-value",
+          visibility: "selected",
+          repositories: ["example"],
+        },
+      });
+      expect(toolResult.isError).not.toBe(true);
+      expect(runGhMock.mock.calls[2]?.[0]).toEqual([
+        "secret",
+        "set",
+        "ORG_TOKEN",
+        "--org",
+        "ma-nakaya",
+        "--visibility",
+        "selected",
+        "--repos",
+        "example",
+      ]);
+      expect(runGhMock.mock.calls[2]?.[3]).toEqual({ stdin: "org-secret-value" });
+      expect(JSON.stringify(appendAuditRecordMock.mock.calls)).not.toContain("org-secret-value");
+      expect(appendAuditRecordMock.mock.calls[1]?.[1]).toMatchObject({
+        tool: "set_organization_secret",
+        owner: "ma-nakaya",
+        secretName: "ORG_TOKEN",
+        outcome: "succeeded",
+      });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses visibility=selected without repositories before any gh call", async () => {
+    runGhMock
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(identityResult());
+    const connection = await connectedClient();
+    try {
+      const toolResult = await connection.client.callTool({
+        name: "set_organization_secret",
+        arguments: {
+          owner: "ma-nakaya",
+          secretName: "ORG_TOKEN",
+          secretValue: "x",
+          visibility: "selected",
+        },
+      });
+      expect(toolResult.isError).toBe(true);
+      expect(JSON.stringify(toolResult.content)).toMatch(/requires at least one repository/);
+      expect(runGhMock.mock.calls.some(([args]) => args[0] === "secret")).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("deletes an organization secret with an audited DELETE", async () => {
+    runGhMock
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(""));
+    const connection = await connectedClient();
+    try {
+      const toolResult = await connection.client.callTool({
+        name: "delete_organization_secret",
+        arguments: { owner: "ma-nakaya", secretName: "ORG_TOKEN" },
+      });
+      expect(toolResult.isError).not.toBe(true);
+      expect(runGhMock.mock.calls[2]?.[0]).toEqual([
+        "api",
+        "orgs/ma-nakaya/actions/secrets/ORG_TOKEN",
+        "--hostname",
+        "github.com",
+        "--method",
+        "DELETE",
+      ]);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("sets and deletes an environment secret through stdin and an audited DELETE", async () => {
+    runGhMock
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(""))
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(""));
+    const connection = await connectedClient();
+    try {
+      const setResult = await connection.client.callTool({
+        name: "set_environment_secret",
+        arguments: { repository, environment: "production", secretName: "DEPLOY_KEY", secretValue: "env-value" },
+      });
+      expect(setResult.isError).not.toBe(true);
+      expect(runGhMock.mock.calls[2]?.[0]).toEqual([
+        "secret",
+        "set",
+        "DEPLOY_KEY",
+        "--repo",
+        repository,
+        "--env",
+        "production",
+      ]);
+      expect(runGhMock.mock.calls[2]?.[3]).toEqual({ stdin: "env-value" });
+
+      const deleteResult = await connection.client.callTool({
+        name: "delete_environment_secret",
+        arguments: { repository, environment: "production", secretName: "DEPLOY_KEY" },
+      });
+      expect(deleteResult.isError).not.toBe(true);
+      expect(runGhMock.mock.calls[5]?.[0]).toEqual([
+        "api",
+        `repos/${repository}/environments/production/secrets/DEPLOY_KEY`,
+        "--hostname",
+        "github.com",
+        "--method",
+        "DELETE",
+      ]);
+    } finally {
+      await connection.close();
+    }
+  });
 });

@@ -689,4 +689,62 @@ describe("repository tree and file read tools", () => {
       await connection.close();
     }
   });
+
+  it("lists organization secrets with visibility and no values", async () => {
+    runGhMock
+      .mockResolvedValueOnce(identity())
+      .mockResolvedValueOnce(ghJson({
+        total_count: 1,
+        secrets: [{
+          name: "ORG_TOKEN",
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-02T00:00:00Z",
+          visibility: "all",
+        }],
+      }));
+    const connection = await connectedClient();
+    try {
+      const result = await connection.client.callTool({
+        name: "list_organization_secrets",
+        arguments: { owner: "ma-nakaya", page: 1, perPage: 30 },
+      });
+      expect(result.isError).not.toBe(true);
+      const parsed = JSON.parse((result.content[0] as { text: string }).text);
+      expect(parsed.secrets).toEqual([{
+        name: "ORG_TOKEN",
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-02T00:00:00Z",
+        visibility: "all",
+      }]);
+      expect(runGhMock.mock.calls[1]?.[0]?.[1]).toContain("orgs/ma-nakaya/actions/secrets?");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("lists environment secrets for a repository environment", async () => {
+    runGhMock
+      .mockResolvedValueOnce(identity())
+      .mockResolvedValueOnce(ghJson({
+        total_count: 1,
+        secrets: [{
+          name: "DEPLOY_KEY",
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-02T00:00:00Z",
+        }],
+      }));
+    const connection = await connectedClient();
+    try {
+      const result = await connection.client.callTool({
+        name: "list_environment_secrets",
+        arguments: { repository, environment: "production", page: 1, perPage: 30 },
+      });
+      expect(result.isError).not.toBe(true);
+      const parsed = JSON.parse((result.content[0] as { text: string }).text);
+      expect(parsed.secrets[0].name).toBe("DEPLOY_KEY");
+      expect(runGhMock.mock.calls[1]?.[0]?.[1]).toContain("/environments/production/secrets?");
+    } finally {
+      await connection.close();
+    }
+  });
 });
