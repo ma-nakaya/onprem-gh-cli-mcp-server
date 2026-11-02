@@ -750,4 +750,84 @@ describe("review and administration MCP tools", () => {
       await connection.close();
     }
   });
+
+  it("sets a repository secret through stdin and never audits or returns the value", async () => {
+    runGhMock
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(""));
+    const connection = await connectedClient();
+    try {
+      const toolResult = await connection.client.callTool({
+        name: "set_repository_secret",
+        arguments: { repository, secretName: "MY_TOKEN", secretValue: "s3cr3t-value" },
+      });
+      expect(toolResult.isError).not.toBe(true);
+      expect(runGhMock.mock.calls[2]?.[0]).toEqual([
+        "secret",
+        "set",
+        "MY_TOKEN",
+        "--repo",
+        repository,
+      ]);
+      expect(runGhMock.mock.calls[2]?.[3]).toEqual({ stdin: "s3cr3t-value" });
+      expect(appendAuditRecordMock.mock.calls[1]?.[1]).toMatchObject({
+        tool: "set_repository_secret",
+        repository,
+        secretName: "MY_TOKEN",
+        outcome: "succeeded",
+      });
+      expect(JSON.stringify(appendAuditRecordMock.mock.calls)).not.toContain("s3cr3t-value");
+      expect(JSON.stringify(toolResult.content)).not.toContain("s3cr3t-value");
+      expect(JSON.stringify(runGhMock.mock.calls.map(([args]) => args))).not.toContain("s3cr3t-value");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("rejects a secret name with the reserved GITHUB_ prefix before any gh call", async () => {
+    const connection = await connectedClient();
+    try {
+      const toolResult = await connection.client.callTool({
+        name: "set_repository_secret",
+        arguments: { repository, secretName: "GITHUB_TOKEN", secretValue: "x" },
+      });
+      expect(toolResult.isError).toBe(true);
+      expect(runGhMock).not.toHaveBeenCalled();
+      expect(appendAuditRecordMock).not.toHaveBeenCalled();
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("deletes a repository secret with an audited DELETE", async () => {
+    runGhMock
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(""));
+    const connection = await connectedClient();
+    try {
+      const toolResult = await connection.client.callTool({
+        name: "delete_repository_secret",
+        arguments: { repository, secretName: "MY_TOKEN" },
+      });
+      expect(toolResult.isError).not.toBe(true);
+      expect(runGhMock.mock.calls[2]?.[0]).toEqual([
+        "api",
+        `repos/${repository}/actions/secrets/MY_TOKEN`,
+        "--hostname",
+        "github.com",
+        "--method",
+        "DELETE",
+      ]);
+      expect(appendAuditRecordMock.mock.calls[1]?.[1]).toMatchObject({
+        tool: "delete_repository_secret",
+        repository,
+        secretName: "MY_TOKEN",
+        outcome: "succeeded",
+      });
+    } finally {
+      await connection.close();
+    }
+  });
 });

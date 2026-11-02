@@ -40,6 +40,9 @@ import {
   registerMilestoneTools,
 } from "./tools/milestones.js";
 import {
+  registerSecretTools,
+} from "./tools/secrets.js";
+import {
   registerPullRequestMutationTools,
 } from "./tools/pull-request-mutations.js";
 import {
@@ -103,6 +106,7 @@ export function createServer(config: Config): McpServer {
   registerLabelTools(server, config);
   registerMilestoneTools(server, config);
   registerProjectTools(server, config);
+  registerSecretTools(server, config);
   server.registerTool("run_gh", {
     description: "Run an allowlisted, read-only GitHub CLI command. With a resource allowlist, only auth status is available; use typed repository tools for other reads.",
     inputSchema: {
