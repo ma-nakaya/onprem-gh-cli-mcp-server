@@ -329,6 +329,48 @@ server.registerTool("delete_repository", {
   });
 });
 
+server.registerTool("update_repository_visibility", {
+  description: "Change the visibility of an allowed repository. Both its stable numeric ID and canonical owner/name confirmation are required, as for delete_repository. Making a private repository public exposes its full history.",
+  inputSchema: {
+    ...writeContextSchema,
+    visibility: z.enum(["public", "private", "internal"]),
+    expectedRepositoryId: repositoryIdSchema,
+    confirmRepository: z.string().trim().min(3).max(201)
+      .describe("Repeat the canonical owner/name returned by get_repository"),
+  },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+}, async ({ account, hostname, repository, visibility, expectedRepositoryId, confirmRepository }) => {
+  const normalizedRepository = repository.trim();
+  const request = await prepareWriteRequest({
+    tool: "update_repository_visibility",
+    repository: normalizedRepository,
+    repositoryId: expectedRepositoryId,
+  }, config, account, hostname);
+  const { context } = request;
+  assertRepositoryAllowed(normalizedRepository, context);
+  const before = await resolveRepositoryDetails(config, context, normalizedRepository);
+  assertRepositoryIdentity(before, normalizedRepository, expectedRepositoryId);
+  if (confirmRepository.trim().toLowerCase() !== before.fullName.toLowerCase()) {
+    throw new Error(
+      `confirmRepository must exactly identify ${before.fullName}; refusing visibility change.`,
+    );
+  }
+  if (before.visibility === visibility) {
+    throw new Error(`Repository ${before.fullName} is already ${visibility}.`);
+  }
+  const operation = await auditedJsonGh(
+    request,
+    ["api", `repos/${before.fullName}`, "--hostname", context.profile.hostname, "--method", "PATCH", "--input", "-", "--jq", REPOSITORY_DETAILS_JQ],
+    { visibility },
+    config,
+  );
+  return response({
+    repository: repositoryDetails(operation.value),
+    previousVisibility: before.visibility,
+    audit: operation.audit,
+  });
+});
+
 server.registerTool("get_branch", {
   description: "Read the current commit SHA for a branch in an allowed repository.",
   inputSchema: { ...writeContextSchema, branch: branchNameSchema },

@@ -668,4 +668,86 @@ describe("review and administration MCP tools", () => {
       await connection.close();
     }
   });
+
+  it("changes repository visibility only after ID and owner/name confirmation match", async () => {
+    runGhMock
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(repositoryDetails()))
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(repositoryDetails({ visibility: "public", isPrivate: false })));
+    const connection = await connectedClient();
+    try {
+      const toolResult = await connection.client.callTool({
+        name: "update_repository_visibility",
+        arguments: {
+          repository,
+          visibility: "public",
+          expectedRepositoryId: 123,
+          confirmRepository: repository,
+        },
+      });
+      expect(toolResult.isError).not.toBe(true);
+      expect(stdinPayload(3)).toEqual({ visibility: "public" });
+      const text = (toolResult.content[0] as { text: string }).text;
+      const parsed = JSON.parse(text);
+      expect(parsed.repository.visibility).toBe("public");
+      expect(parsed.previousVisibility).toBe("private");
+      expect(appendAuditRecordMock.mock.calls[1]?.[1]).toMatchObject({
+        tool: "update_repository_visibility",
+        repository,
+        repositoryId: 123,
+        outcome: "succeeded",
+      });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses a visibility change when the confirmation does not match", async () => {
+    runGhMock
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(repositoryDetails()));
+    const connection = await connectedClient();
+    try {
+      const toolResult = await connection.client.callTool({
+        name: "update_repository_visibility",
+        arguments: {
+          repository,
+          visibility: "public",
+          expectedRepositoryId: 123,
+          confirmRepository: "ma-nakaya/other",
+        },
+      });
+      expect(toolResult.isError).toBe(true);
+      expect(JSON.stringify(toolResult.content)).toMatch(/confirmRepository must exactly identify/);
+      expect(runGhMock).toHaveBeenCalledTimes(2);
+      expect(appendAuditRecordMock).not.toHaveBeenCalled();
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses a visibility change to the current visibility", async () => {
+    runGhMock
+      .mockResolvedValueOnce(identityResult())
+      .mockResolvedValueOnce(result(repositoryDetails({ visibility: "public", isPrivate: false })));
+    const connection = await connectedClient();
+    try {
+      const toolResult = await connection.client.callTool({
+        name: "update_repository_visibility",
+        arguments: {
+          repository,
+          visibility: "public",
+          expectedRepositoryId: 123,
+          confirmRepository: repository,
+        },
+      });
+      expect(toolResult.isError).toBe(true);
+      expect(JSON.stringify(toolResult.content)).toMatch(/already public/);
+      expect(runGhMock).toHaveBeenCalledTimes(2);
+      expect(appendAuditRecordMock).not.toHaveBeenCalled();
+    } finally {
+      await connection.close();
+    }
+  });
 });
