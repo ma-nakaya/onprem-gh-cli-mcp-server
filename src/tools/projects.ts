@@ -474,18 +474,29 @@ const singleSelectOptionSchema = z.object({
   description: z.string().max(256).optional(),
 });
 
+const iterationConfigurationSchema = z.object({
+  startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Iteration start dates must use YYYY-MM-DD."),
+  durationDays: z.number().int().min(1).max(365),
+  iterations: z.array(z.object({
+    title: z.string().trim().min(1).max(256),
+    startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Iteration start dates must use YYYY-MM-DD."),
+    durationDays: z.number().int().min(1).max(365).optional(),
+  })).max(50).optional(),
+});
+
 server.registerTool("create_project_field", {
-  description: "Create a TEXT, NUMBER, DATE, or SINGLE_SELECT field on a GitHub Projects v2 project. SINGLE_SELECT requires at least one option. Iteration fields cannot be created by this tool.",
+  description: "Create a TEXT, NUMBER, DATE, SINGLE_SELECT, or ITERATION field on a GitHub Projects v2 project. SINGLE_SELECT requires at least one option; ITERATION requires an iteration configuration.",
   inputSchema: {
     ...requestContextSchema,
     owner: ownerLoginSchema,
     projectId: projectIdSchema,
     name: z.string().trim().min(1).max(256),
-    dataType: z.enum(["TEXT", "NUMBER", "DATE", "SINGLE_SELECT"]),
+    dataType: z.enum(["TEXT", "NUMBER", "DATE", "SINGLE_SELECT", "ITERATION"]),
     singleSelectOptions: z.array(singleSelectOptionSchema).min(1).max(50).optional(),
+    iterationConfiguration: iterationConfigurationSchema.optional(),
   },
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-}, async ({ account, hostname, owner, projectId, name, dataType, singleSelectOptions }) => {
+}, async ({ account, hostname, owner, projectId, name, dataType, singleSelectOptions, iterationConfiguration }) => {
   const normalizedOwner = owner.trim().toLowerCase();
   const normalizedProjectId = projectId.trim();
   const request = await prepareWriteRequest({
@@ -502,9 +513,15 @@ server.registerTool("create_project_field", {
   if (dataType !== "SINGLE_SELECT" && singleSelectOptions !== undefined) {
     throw new Error("singleSelectOptions can only be provided for SINGLE_SELECT fields.");
   }
+  if (dataType === "ITERATION" && iterationConfiguration === undefined) {
+    throw new Error("ITERATION fields require an iteration configuration.");
+  }
+  if (dataType !== "ITERATION" && iterationConfiguration !== undefined) {
+    throw new Error("iterationConfiguration can only be provided for ITERATION fields.");
+  }
   await assertProjectAccess(normalizedProjectId, owner, config, context);
-  const query = `mutation($projectId: ID!, $dataType: ProjectV2CustomFieldType!, $name: String!, $options: [ProjectV2SingleSelectFieldOptionInput!]) {
-    createProjectV2Field(input: { projectId: $projectId, dataType: $dataType, name: $name, singleSelectOptions: $options }) {
+  const query = `mutation($projectId: ID!, $dataType: ProjectV2CustomFieldType!, $name: String!, $options: [ProjectV2SingleSelectFieldOptionInput!], $iterationConfiguration: ProjectV2IterationFieldConfigurationInput) {
+    createProjectV2Field(input: { projectId: $projectId, dataType: $dataType, name: $name, singleSelectOptions: $options, iterationConfiguration: $iterationConfiguration }) {
       projectV2Field { id name dataType __typename ... on ProjectV2SingleSelectField { options { id name } } }
     }
   }`;
@@ -519,6 +536,19 @@ server.registerTool("create_project_field", {
       color: option.color,
       ...(option.description === undefined ? {} : { description: option.description }),
     }));
+  }
+  if (iterationConfiguration !== undefined) {
+    variables.iterationConfiguration = {
+      startDate: iterationConfiguration.startDate,
+      duration: iterationConfiguration.durationDays,
+      ...(iterationConfiguration.iterations === undefined ? {} : {
+        iterations: iterationConfiguration.iterations.map((iteration) => ({
+          title: iteration.title,
+          startDate: iteration.startDate,
+          ...(iteration.durationDays === undefined ? {} : { duration: iteration.durationDays }),
+        })),
+      }),
+    };
   }
   const operation = await auditedGraphqlGh(
     request,
