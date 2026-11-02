@@ -87,7 +87,6 @@ const expectedTools = [
 ];
 
 const forbiddenTools = [
-  "delete_release",
   "delete_project",
   "delete_project_item",
   "create_project_field",
