@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertDraftRelease, releaseIdentifier, releaseSummary } from "../src/release.js";
+import { assertDraftRelease, assertPublishableRelease, releaseIdentifier, releaseSummary } from "../src/release.js";
 
 describe("release response handling", () => {
   it("returns stable metadata without release body content", () => {
@@ -37,5 +37,13 @@ describe("release response handling", () => {
     expect(releaseIdentifier({ id: 99 })).toBe(99);
     expect(() => releaseIdentifier({ id: "99" })).toThrow(/valid ID/);
     expect(() => releaseIdentifier({ id: 0 })).toThrow(/valid ID/);
+  });
+});
+
+describe("assertPublishableRelease", () => {
+  it("allows only draft releases to be published", () => {
+    expect(() => assertPublishableRelease({ draft: true }, 99)).not.toThrow();
+    expect(() => assertPublishableRelease({ draft: false }, 99)).toThrow(/not a draft/);
+    expect(() => assertPublishableRelease(null, 99)).toThrow(/unexpected release response/);
   });
 });

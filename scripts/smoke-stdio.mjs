@@ -54,6 +54,7 @@ const expectedTools = [
   "dispatch_workflow",
   "create_release",
   "update_release",
+  "publish_release",
   "list_labels",
   "list_issue_labels",
   "add_issue_labels",

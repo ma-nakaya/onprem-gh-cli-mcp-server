@@ -44,7 +44,7 @@ describe("MCP tool registration", () => {
         expect(tools.has(name)).toBe(true);
         expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
       }
-      for (const name of ["create_release", "update_release"]) {
+      for (const name of ["create_release", "update_release", "publish_release"]) {
         expect(tools.has(name)).toBe(true);
         expect(tools.get(name)?.annotations?.readOnlyHint).toBe(false);
       }
@@ -80,7 +80,6 @@ describe("MCP tool registration", () => {
       expect(tools.get("update_repository_description")?.annotations?.readOnlyHint).toBe(false);
       expect(tools.get("delete_repository")?.annotations?.readOnlyHint).toBe(false);
       expect(tools.get("delete_repository")?.annotations?.destructiveHint).toBe(true);
-      expect(tools.has("publish_release")).toBe(false);
       expect(tools.has("delete_release")).toBe(false);
       expect(tools.has("dispatch_workflow")).toBe(true);
       expect(tools.get("dispatch_workflow")?.annotations?.readOnlyHint).toBe(false);
