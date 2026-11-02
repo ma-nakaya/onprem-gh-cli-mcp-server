@@ -787,6 +787,80 @@ describe("MCP account and resource isolation", () => {
     }
   });
 
+  it("deletes a label after reading it and audits the mutation", async () => {
+    runGhMock.mockImplementation(async (args) => {
+      if (args[1] === "user") {
+        return { exitCode: 0, stdout: "masa-nakaya\n", stderr: "" };
+      }
+      if (args[1] === "repos/masa-nakaya/example/labels/bug" && !args.includes("--method")) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({ id: 5, name: "bug", color: "d73a4a", default: true, url: "https://api.github.com/repos/masa-nakaya/example/labels/bug" }),
+          stderr: "",
+        };
+      }
+      if (args[1] === "repos/masa-nakaya/example/labels/bug" && args.includes("DELETE")) {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      throw new Error(`Unexpected gh endpoint in test: ${args[1] ?? ""}`);
+    });
+    const connection = await connectedClient(accountConfig());
+
+    try {
+      const result = await connection.client.callTool({
+        name: "delete_label",
+        arguments: { repository: "masa-nakaya/example", name: "bug" },
+      });
+
+      expect(result.isError).not.toBe(true);
+      expect(appendAuditRecordMock.mock.calls.at(-1)?.[1]).toMatchObject({
+        tool: "delete_label",
+        outcome: "succeeded",
+        label: "bug",
+      });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("deletes a milestone after reading it and audits the mutation", async () => {
+    runGhMock.mockImplementation(async (args) => {
+      if (args[1] === "user") {
+        return { exitCode: 0, stdout: "masa-nakaya\n", stderr: "" };
+      }
+      if (args[1] === "repos/masa-nakaya/example/milestones/3" && !args.includes("--method")) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({ number: 3, title: "v1.0", state: "open", due_on: null, html_url: "https://github.com/masa-nakaya/example/milestone/3", open_issues: 2, closed_issues: 1, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-02T00:00:00Z" }),
+          stderr: "",
+        };
+      }
+      if (args[1] === "repos/masa-nakaya/example/milestones/3" && args.includes("DELETE")) {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      throw new Error(`Unexpected gh endpoint in test: ${args[1] ?? ""}`);
+    });
+    const connection = await connectedClient(accountConfig());
+
+    try {
+      const result = await connection.client.callTool({
+        name: "delete_milestone",
+        arguments: { repository: "masa-nakaya/example", milestoneNumber: 3 },
+      });
+
+      expect(result.isError).not.toBe(true);
+      const parsed = JSON.parse((result.content[0] as { text: string }).text);
+      expect(parsed.deleted.milestone.title).toBe("v1.0");
+      expect(appendAuditRecordMock.mock.calls.at(-1)?.[1]).toMatchObject({
+        tool: "delete_milestone",
+        outcome: "succeeded",
+        milestoneNumber: 3,
+      });
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("audits a GraphQL mutation rejected through top-level errors as failed", async () => {
     runGhMock.mockImplementation(async (args) => {
       if (args[1] === "user") {

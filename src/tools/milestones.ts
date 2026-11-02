@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Config } from "../config.js";
+import { runGh } from "../gh-runner.js";
 import { assertRepositoryAllowed } from "../policy.js";
 import {
   milestoneIdentifier,
@@ -8,6 +9,7 @@ import {
 } from "../repository-metadata.js";
 import {
   auditedJsonGh,
+  auditedOperation,
   buildContextSchemas,
   buildSharedSchemas,
   jsonGh,
@@ -51,7 +53,7 @@ server.registerTool("create_milestone", {
 });
 
 server.registerTool("update_milestone", {
-  description: "Update an existing milestone title, description, reversible open/closed state, or UTC due date. This tool cannot delete milestones.",
+  description: "Update an existing milestone title, description, reversible open/closed state, or UTC due date.",
   inputSchema: {
     ...writeContextSchema,
     milestoneNumber: z.number().int().positive(),
@@ -86,6 +88,34 @@ server.registerTool("update_milestone", {
     config,
   );
   return response({ milestone: milestoneSummary(operation.value), audit: operation.audit });
+});
+
+server.registerTool("delete_milestone", {
+  description: "Delete a milestone from an allowed repository. Issues and pull requests assigned to it lose the milestone. This operation cannot be undone by this MCP server.",
+  inputSchema: {
+    ...writeContextSchema,
+    milestoneNumber: z.number().int().positive(),
+  },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+}, async ({ account, repository, hostname, milestoneNumber }) => {
+  const normalizedRepository = repository.trim();
+  const request = await prepareWriteRequest({
+    tool: "delete_milestone",
+    repository: normalizedRepository,
+    milestoneNumber,
+  }, config, account, hostname);
+  const { context } = request;
+  assertRepositoryAllowed(repository, context);
+  const normalizedHostname = context.profile.hostname;
+  const milestonePath = `repos/${normalizedRepository}/milestones/${milestoneNumber}`;
+  const existing = await jsonGh(["api", milestonePath, "--hostname", normalizedHostname], config, context);
+  const summary = milestoneSummary(existing);
+  const operation = await auditedOperation(
+    request,
+    config,
+    () => runGh(["api", milestonePath, "--hostname", normalizedHostname, "--method", "DELETE"], config, context),
+  );
+  return response({ deleted: { milestone: summary, repository: normalizedRepository }, audit: operation.audit });
 });
 
 }
